@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Autoscaling group for web-servers
+Parameters:
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the EC2 instances
+  DBName:
+    Type: String
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    Description: DB name
+    MinLength: "1"
+    MaxLength: "64"
+    ConstraintDescription : "must begin with a letter and contain only alphanumeric characters."
+  DBUsername:
+    Type: String
+    Description: DB Username
+    NoEcho: true
+    MinLength: "1"
+    MaxLength: "16"
+    AllowedPattern : "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription : "Must begin with a letter and contain only alphanumeric characters."
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: DB Password
+    MinLength: "8"
+    MaxLength: "41"
+    AllowedPattern : "[a-zA-Z0-9]*"
+    ConstraintDescription : "must contain only alphanumeric characters."
+  DBDns:
+    Type: String
+    Description: DB instance DNS
+  InstanceType:
+    Type: String
+    Description: Web server EC2 instance type
+    Default: t2.micro
+    AllowedValues: [t2.micro]
+    ConstraintDescription: Must be a valid EC2 instance type
+  InstanceSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Instance security group
+    ConstraintDescription: Security group id for the web instances
+  WebServerCapacity:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 5
+    Description: The initial time of Webserver instances
+    ConstraintDescription: "Must be between 1 and 5"
+  TargetGroupARN:
+    Type: String
+    Description: The ARN of the Target group attached to the ALB
+Mappings:
+  AWSInstanceType2Arch:
+    t2.micro:
+      Arch: HVM64
+  AWSRegionArch2AMI:
+    us-east-1:
+      HVM64: ami-6057e21a
+    us-west-1:
+      HVM64: ami-1a033c7a
+    eu-west-1:
+      HVM64: ami-760aaa0f
+Resources:
+  WebServerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PrivateSubnetIds
+      LaunchConfigurationName: !Ref AppLaunchConfig
+      MinSize: 1
+      MaxSize: 5
+      DesiredCapacity: !Ref WebServerCapacity
+      TargetGroupARNs: 
+      - !Ref TargetGroupARN
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: "PT15M"
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: "PT15M"
+        WaitOnResourceSignals: true
+  AppLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          wordpress_install:
+          - "install_cfn"
+          - "install_wordpress"
+        install_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf: #detect changes in resource metadata and run user-specified actions (update running instances through the UpdateStack API)
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cf/hooks.d/cf-auto-reloader.conf: #actions that cfn-hup daemon calls periodically are defined in this directory (hooks.d) Files with the same name will be merged.
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppLaunchConfig --configsets wordpress_install --region ${AWS::Region}
+            mode: "000400"
+            owner: root
+            group: root
+          services: #define which service should be enabled or disabled when the instance is launched
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                - "/etc/cfn/cfn-hup.conf"
+                - "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
+        install_wordpress:
+          packages:
+            yum:
+              php: []
+              php-mysql: []
+              mysql: []
+              httpd: []
+          sources:
+            /var/www/html: https://wordpress.org/latest.tar.gz #download an archive and unpack in a target directory
+          files:
+            /tmp/create-wp-config:
+              content: !Sub |
+                #!/bin/bash
+                cp /var/www/html/wordpress/wp-config-sample.php /var/www/html/wordpress/wp-config.php
+                sed -i "s/'database_name_here'/'${DBName}'/g" wp-config.php
+                sed -i "s/'username_here'/'${DBUsername}'/g" wp-config.php
+                sed -i "s/'password_here'/'${DBPassword}'/g" wp-config.php
+                sed -i "s/'localhost'/'${DBDns}'/g" wp-config.php
+              mode: "000500"
+              owner: root
+              group: root
+          commands:
+            01_configure_wordpress:
+              command: /tmp/create-wp-config
+              cwd: /var/www/html/wordpress
+          services:
+            sysvinit:
+              httpd:
+                enabled: true
+                ensureRunning: true
+    Properties:
+      ImageId: !FindInMap [AWSRegionArch2AMI, !Ref "AWS::Region", !FindInMap [AWSInstanceType2Arch, !Ref "InstanceType", Arch]]
+      InstanceType: !Ref InstanceType
+      SecurityGroups: !Ref InstanceSecurityGroupId
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum update -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppLaunchConfig --configsets wordpress_install --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebServerGroup --region ${AWS::Region}
+Outputs:
+  WebsiteURL:
+    Value: !Join
+    - ''
+    - -  http://
+      -  !GetAtt TargetGroupARN.DNSName

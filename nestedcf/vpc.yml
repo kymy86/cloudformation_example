@@ -1,0 +1,211 @@
+  AWSTemplateFormatVersion: "2010-09-09"
+  Description:
+    This script builds a VPC with 1 public sunet and a private subnet with a NAT Gateway.
+  Parameters:
+    VPCCidrBlock:
+      Type: String
+      Description: The VPC CIDR Block
+      AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+      ConstraintDescription: Valid VPC CIDR is between /16 and /28
+    PublicSubnetCidrBlock:
+      Type: String
+      Description: Public subnet CIDR Block
+      AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+      ConstraintDescription: Valid Subnet CIDR is between /16 and /28
+    PublicSubnetCidrBlock2:
+      Type: String
+      Description: Second public subnet CIDR Block
+      AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+      ConstraintDescription: Valid Subnet CIDR is between /16 and /28
+    PrivateSubnetCidrBlock:
+      Type: String
+      Description: Private subnet CIDR Block
+      AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+      ConstraintDescription: Valid Subnet CIDR is between /16 and /28
+    PrivateSubnetCidrBlock2:
+      Type: String
+      Description: Second private subnet CIDR block
+      AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+      ConstraintDescription: Valid Subnet CIDR is between /16 and /28
+  Mappings:
+    AWSRegion2AZ:
+      eu-west-1:
+        "1": eu-west-1a
+        "2": eu-west-1b
+        "3": eu-west-1c
+      eu-west-2:
+        "1": eu-west-2a
+        "2": eu-west-2b
+        "3": eu-west-2c
+      eu-central-1:
+        "1": eu-central-1a
+        "2": eu-central-1b
+        "3": eu-central-1c
+      us-east-1:
+        "1": us-east-1a
+        "2": us-east-1b
+        "3": us-east-1c
+  Resources:
+    AppVPC:
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: !Ref VPCCidrBlock
+        EnableDnsSupport: true
+        EnableDnsHostnames: true
+        InstanceTenancy: default
+        Tags:
+        - Key: Name
+          Value: !Sub |
+            ${AWS::StackName} VPC
+    PublicSubnet:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref AppVPC
+        CidrBlock: !Ref PublicSubnetCidrBlock
+        AvailabilityZone: !FindInMap [AWSRegion2AZ, !Ref "AWS::Region", "1"]
+        MapPublicIpOnLaunch: true
+        Tags:
+        - Key: Name
+          Value: !Join
+            - " "
+            - - !Ref AWS::StackName
+              - Public Subnet
+              - !FindInMap [AWSRegion2AZ, !Ref "AWS::Region", "1"]    
+    PublicSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref AppVPC
+        CidrBlock: !Ref PublicSubnetCidrBlock2
+        AvailabilityZone: !FindInMap [AWSRegion2AZ, !Ref "AWS::Region", "2"]
+        MapPublicIpOnLaunch: true
+        Tags:
+        - Key: Name
+          Value: !Join
+            - " "
+            - - !Ref AWS::StackName
+              - Public Subnet
+              - !FindInMap [AWSRegion2AZ, !Ref "AWS::Region", "2"]      
+    PrivateSubnet:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref AppVPC
+        CidrBlock: !Ref PrivateSubnetCidrBlock
+        AvailabilityZone: !FindInMap [AWSRegion2AZ, !Ref "AWS::Region", "1"]
+        Tags:
+        - Key: Name
+          Value: !Join
+            - " "
+            - - !Ref AWS::StackName
+              - Private Subnet
+              - !FindInMap [AWSRegion2AZ, !Ref "AWS::Region", "1"]    
+    PrivateSubnet2:
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref AppVPC
+        CidrBlock: !Ref PrivateSubnetCidrBlock2
+        AvailabilityZone: !FindInMap [AWSRegion2AZ, !Ref "AWS::Region", "2"]
+        Tags:
+        - Key: Name
+          Value: !Join
+            - " "
+            - - !Ref AWS::StackName
+              - Private Subnet
+              - !FindInMap [AWSRegion2AZ, !Ref "AWS::Region", "2"]    
+    AppIGW:
+      Type: AWS::EC2::InternetGateway
+      Properties:
+        Tags:
+        - Key: Name
+          Value: !Sub |
+            ${AWS::StackName} IGW
+    AttachGateway:
+      Type: AWS::EC2::VPCGatewayAttachment
+      Properties:
+        InternetGatewayId: !Ref AppIGW
+        VpcId: !Ref AppVPC
+    NATEIP:
+      Type: AWS::EC2::EIP
+      Properties:
+        Domain: vpc
+    NATGateway:
+      Type: AWS::EC2::NatGateway
+      Properties:
+        AllocationId: !GetAtt NATEIP.AllocationId
+        SubnetId: !Ref PublicSubnet
+        Tags:
+        - Key: Name
+          Value: !Sub |
+            ${AWS::StackName} Nat Gateway
+      DependsOn: NATEIP
+    PublicRouteTable:
+      Type: AWS::EC2::RouteTable
+      DependsOn: AppVPC
+      Properties:
+        VpcId: !Ref AppVPC
+        Tags:
+        - Key: Name
+          Value: !Sub |
+            ${AWS::StackName} Public Route Table
+    PublicRoute:
+      Type: AWS::EC2::Route
+      DependsOn: AttachGateway
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        GatewayId: !Ref AppIGW
+    PrivateRouteTable:
+      Type: AWS::EC2::RouteTable
+      Properties:
+        VpcId: !Ref AppVPC
+        Tags:
+        - Key: Name
+          Value: !Sub |
+            ${AWS::StackName} Private Route Table
+    PrivateRoute:
+      Type: AWS::EC2::Route
+      Properties:
+        RouteTableId: !Ref PrivateRouteTable
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId: !Ref NATGateway
+    PublicSubnetRouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        SubnetId: !Ref PublicSubnet
+    PublicSubnetRouteTableAssociation2:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        RouteTableId: !Ref PublicRouteTable
+        SubnetId: !Ref PublicSubnet2
+    PrivateSubnetRouteTableAssociation:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        RouteTableId: !Ref PrivateRouteTable
+        SubnetId: !Ref PrivateSubnet
+    PrivateSubnetRouteTableAssociation2:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties:
+        RouteTableId: !Ref PrivateRouteTable
+        SubnetId: !Ref PrivateSubnet2
+  Outputs:
+    VPCId:
+      Value: !Ref AppVPC
+      Description: The VPC ID
+    PublicSubnetCidrBlock:
+      Value: !Ref PublicSubnetCidrBlock
+      Description: CIDR of public subnet
+    PublicSubnetID:
+      Value: !Ref PublicSubnet
+      Description: ID first public subnet
+    PublicSubnetID2:
+      Value: !Ref PublicSubnet2
+      Description: ID second public subnet
+    StackName:
+      Value: !Ref AWS::StackName
+      Description: CF stack name
+    PrivateSubnetID:
+      Value: !Ref PrivateSubnet
+      Description: ID first private subnet
+    PrivateSubnetID2:
+      Value: !Ref PrivateSubnet2
+      Description: ID secondo private subnet

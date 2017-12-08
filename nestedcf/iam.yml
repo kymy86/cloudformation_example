@@ -1,0 +1,44 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+  This script build IAM role and an EC2 instance profile
+Resources:
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2008-10-17"
+        Statement:
+        - Action: sts:AssumeRole
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Effect: Allow
+  RolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: iam-role-policy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action:
+          - ec2:DescribeInstances
+          Effect: Allow
+          Resource:
+          - "*"
+        - Action:
+          - "s3:*"
+          Effect: Allow
+          Resource:
+          - "*"
+      Roles:
+        - Ref: IAMRole
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+        - Ref: IAMRole
+Outputs:
+  InstanceProfile:
+    Description: The instance profile ID
+    Value: !Ref InstanceProfile

@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description:
+  This script build a bunch of security groups for the db cluster, bastion host and web servers
+Parameters:
+  SSHCidr:
+    Type: String
+    MinLength: "9"
+    MaxLength: "18"
+    Description: The CIDR block from where the SSH access to the bastion host is allowed
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC ID security groups belong to
+    ConstraintDescription: You entered an invalid VPC ID
+Resources:
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for bastion host
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: !Ref SSHCidr
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: 0
+        ToPort: 0
+        CidrIp: "0.0.0.0/0"
+      Tags:
+      - Key: Name
+        Value: !Sub |
+          ${AWS::StackName} Bastion Host SG
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group fro ALB
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: "0.0.0.0/0"
+      Tags:
+      - Key: Name
+        Value: !Sub |
+          ${AWS::StackName} ALB SG
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Instances
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: !Ref ALBSecurityGroup
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        SourceSecurityGroupId: !Ref BastionSecurityGroup
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: 0
+        ToPort: 0
+        CidrIp: "0.0.0.0/0"
+      Tags:
+      - Key: Name
+        Value: !Sub |
+          ${AWS::StackName} Instances SG
+  DbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for database instance
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 3306
+        ToPort: 3306
+        SourceSecurityGroupId: !Ref InstanceSecurityGroup
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: 0
+        ToPort: 0 
+        CidrIp: "0.0.0.0/0"
+      Tags:
+      - Key: Name
+        Value: !Sub |
+          ${AWS::StackName} DB sg
+Outputs:
+  DatabaseSG:
+    Value: !Ref DbSecurityGroup
+  BastionSG:
+    Value: !Ref BastionSecurityGroup
+  InstanceSG:
+    Value: !Ref InstanceSecurityGroup
+  LoadBalancerSG:
+    Value: !Ref ALBSecurityGroup

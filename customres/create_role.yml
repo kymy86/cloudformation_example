@@ -1,0 +1,39 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  LambdaSSMPermissions:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Policy for granting the Lambda the parameter store access
+      Path: "/"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - 
+          Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: arn:aws:logs:*:*:*
+        - 
+          Effect: Allow
+          Action:
+            - ssm:DescribeParameters
+            - ssm:GetParameters
+          Resource: arn:aws:ssm:*:*:*
+  SsmIAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: "/"
+      ManagedPolicyArns:
+        - !Ref LambdaSSMPermissions
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        -
+          Effect: Allow
+          Action:
+            - sts:AssumeRole
+          Principal:
+            Service:
+              - lambda.amazonaws.com

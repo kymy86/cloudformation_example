@@ -1,0 +1,54 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create an Application Load Balancer
+Parameters:
+  ALBSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security Group for the Application Load Balancer
+    ConstraintDescription: You entered an invalid Security Group ID
+  ALBSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnet ID for the Application Load Balancer
+    ConstraintDescription: You entered an invalid Subnet ID
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC ID security group belongs to
+    ConstraintDescription: You entered an invalid VPC ID
+Resources:
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: AppALB
+      SecurityGroups: 
+      - !Ref ALBSecurityGroupId
+      Subnets: !Ref ALBSubnets
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: AppHealthCheck
+      HealthCheckIntervalSeconds: 30
+      UnhealthyThresholdCount: 5
+      HealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 10
+      HealthCheckPath: "/"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPCId
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+Outputs:
+  ALBDns:
+    Value: !GetAtt ALB.DNSName
+    Description: DNS of the Application Load Balancer
+  TargetARN:
+    Value: !Ref ALBTargetGroup
+    Description: ARN of the ALB target group
+  
+
+

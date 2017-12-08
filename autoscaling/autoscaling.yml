@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  RegionVPC:
+    Default: vpc-c3add4a7
+    Description: The ID of the VPC where the autoscaling group will be created
+    Type: AWS::EC2::VPC::Id
+  Subnet1:
+    Default: subnet-9c8212a1
+    Type: AWS::EC2::Subnet::Id
+    Description: The ID Of the first subnet
+  Subnet2:
+    Default: subnet-e49a5bbc
+    Type: AWS::EC2::Subnet::Id
+    Description: The ID Of the second subnet
+  Subnet3:
+    Default: subnet-7818ab74
+    Type: AWS::EC2::Subnet::Id
+    Description: The ID Of the third subnet
+  KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Key pair for accessing the instances in the ASG
+    Default: testkey
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: ASG instance type
+Mappings:
+  AMI2Region:
+    us-east-1:
+      "1": ami-55ef662f
+    us-west-1:
+      "1": ami-a51f27c5
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2008-10-17"
+        Statement:
+        - Action: sts:AssumeRole
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Effect: Allow
+  RolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: iam-role-policy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Action: 
+          - "s3:*"
+          Effect: Allow
+          Resource:
+          - "*"
+        - Action:
+          - "dynamodb:*"
+          Effect: Allow
+          Resource:
+          - "*"
+        - Action:
+          - "cloudwatch:*"
+          Effect: Allow
+          Resource:
+          - "*"
+        - Action:
+          - "logs:*"
+          Effect: Allow
+          Resource:
+          - "*"
+      Roles: 
+        - !Ref InstanceRole
+  ASGInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref InstanceRole
+      InstanceProfileName: DynamoCWRole
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for the Application Load Balancer
+      VpcId: !Ref RegionVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags: 
+        - Key: Name
+          Value: !Sub | 
+            ${AWS::StackName} ALB SG
+  ASGSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG fro the EC2 in the ASG
+      VpcId: !Ref RegionVPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: 0
+        ToPort: 0
+        CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub |
+            ${AWS::StackName} ASG instances SG
+  ApplicationLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ApplicationLB
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: 
+        - !Ref Subnet1
+        - !Ref Subnet2
+        - !Ref Subnet3
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: AppHealthCheck
+      HealthCheckIntervalSeconds: 30
+      UnhealthyThresholdCount: 5
+      HealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 10
+      HealthCheckPath: "/"
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref RegionVPC
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLB
+      Port: 80
+      Protocol: HTTP
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "Image"
+      AttributeDefinitions:
+      - AttributeName: "ImageId"
+        AttributeType: "S"
+      KeySchema:
+      - AttributeName: "ImageId"
+        KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+  WPLaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      IamInstanceProfile: !Ref ASGInstanceProfile
+      ImageId: !FindInMap ["AMI2Region", !Ref "AWS::Region", "1"]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPair
+      SecurityGroups:
+      - !Ref ASGSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum update -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --region ${AWS::Region} --resource WPLaunchConfiguration --configsets appInstall
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --region ${AWS::Region} --resource WPAutoScalingGroup
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          appInstall:
+          - "install_cfn"
+          - "configure_dynamodb"
+          - "install_php"
+          - "configure_cw_agent"
+        install_cfn:
+          files:
+            /etc/cfn/cfn-hup.conf:
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=5
+              mode: "000400"
+              owner: root
+              group: root
+            /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.WPLaunchConfiguration.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --region ${AWS::Region} --resource WPLaunchConfiguration --configsets appInstall
+                runas=root
+              mode: "000400"
+              owner: root
+              group: root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                - "/etc/cfn/cfn-hup.conf"
+                - "/etc/cfn/hooks.d/cf-auto-reloader.conf"
+        configure_dynamodb:
+          files:
+            /tmp/item.json:
+              content: !Sub |
+                {
+                  "Image":{"S":"test.png"},
+                  "Dimension":{"S":"500"},
+                  "ImageId":{"S":"aaaaabbbbccccddddeee"}
+                }
+              mode: "000644"
+              owner: root
+              group: root
+          commands:
+            01_configure_dynamo_db:
+              command: !Sub |
+                aws dynamodb put-item --table-name ${DynamoDBTable} --item file:///tmp/item.json --region ${AWS::Region}
+        install_php:
+          packages:
+            yum:
+              httpd: []
+              php: []
+          files:
+            /var/www/html/index.php:
+              content: !Sub |
+                <?php echo "<h1>Cloudformation Sample application</h1>"?>
+              mode: "000644"
+              owner: apache
+              group: apache
+          services:
+            sysvinit:
+              httpd:
+                enabled: true
+                ensureRunning: true
+        configure_cw_agent:
+          packages:
+            yum:
+              awslogs: []
+          files:
+            /tmp/file_to_log:
+              content: !Sub |
+                [/var/log/httpd/error_log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/httpd/error_log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/httpd/error_log
+                [/var/log/httpd/access_log]
+                datetime_format = %b %d %H:%M:%S
+                file = /var/log/httpd/access_log
+                buffer_duration = 5000
+                log_stream_name = {instance_id}
+                initial_position = start_of_file
+                log_group_name = /var/log/httpd/access_log
+              mode: "000600"
+              group: root
+              owner: root
+          commands:
+            02_enable_logging:
+              command: "cat /tmp/file_to_log >> /etc/awslogs/awslogs.conf"
+          services:
+            sysvinit:
+              awslogs:
+                enabled: true
+                ensureRunning: true
+  WPAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+        Count: 2
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstanceInService: 1
+        MaxBatchSize: 1
+        PauseTime: "PT15M"
+        WaitOnResourceSignals: true
+    Properties:
+      VPCZoneIdentifier: 
+      - !Ref Subnet1
+      - !Ref Subnet2
+      - !Ref Subnet3
+      LaunchConfigurationName: !Ref WPLaunchConfiguration
+      MinSize: 1
+      MaxSize: 3
+      DesiredCapacity: 2
+      TargetGroupARNs:
+      - !Ref ALBTargetGroup
+Outputs:
+  ALBUrl:
+    Value: !Join
+    - ''
+    - -  "http://"
+      -  !GetAtt ApplicationLB.DNSName

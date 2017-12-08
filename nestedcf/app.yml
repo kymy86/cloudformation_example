@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Stack with ALB, Autoscaling group with Drupal, BastionHost and RDS
+Parameters:
+  KeyName:
+    Description: Key Pair Name
+    Type: AWS::EC2::KeyPair::KeyName
+  VPCCidrBlock:
+    Type: String
+    Description: The VPC CIDR Block
+    Default: "10.0.0.0/16"
+    AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+    ConstraintDescription: Valid VPC CIDR is between /16 and /28
+  SSHCidr:
+    Type: String
+    MinLength: "9"
+    MaxLength: "18"
+    Description: The CIDR block from where the SSH access to the bastion host is allowed
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+  PublicSubnetCidrBlock:
+    Type: String
+    Description: Public subnet CIDR Block
+    Default: "10.0.4.0/22"
+    AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+    ConstraintDescription: Valid Subnet CIDR is between /16 and /28
+  PublicSubnetCidrBlock2:
+    Type: String
+    Description: Public subnet CIDR Block
+    Default: "10.0.8.0/22"
+    AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+    ConstraintDescription: Valid Subnet CIDR is between /16 and /28
+  PrivateSubnetCidrBlock:
+    Type: String
+    Description: Private subnet CIDR Block
+    Default: "10.0.16.0/21"
+    AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+  PrivateSubnetCidrBlock2:
+    Type: String
+    Description: Private subnet CIDR Block
+    Default: "10.0.24.0/21"
+    AllowedPattern: (\d{1,3}\.){3}\d{1,3}(\/(1[6-9]|2[0-8]))
+    ConstraintDescription: Valid Subnet CIDR is between /16 and /28
+  DBUsername:
+    Type: String
+    Description: DB Username
+    NoEcho: true
+    MinLength: "1"
+    MaxLength: "16"
+    AllowedPattern : "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription : "Must begin with a letter and contain only alphanumeric characters."
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: DB Password
+    MinLength: "8"
+    MaxLength: "41"
+    AllowedPattern : "[a-zA-Z0-9]*"
+    ConstraintDescription : "must contain only alphanumeric characters."
+  DBName:
+    Type: String
+    AllowedPattern : "[a-zA-Z][a-zA-Z0-9]*"
+    Description: DB name
+    MinLength: "1"
+    MaxLength: "64"
+    ConstraintDescription : "must begin with a letter and contain only alphanumeric characters."
+  NetworkTemplateURL:
+    Type: String
+    Description: Network template URL
+  SecurityTemplateURL:
+    Type: String
+    Description: Security template URL
+  IAMTemplateURL:
+    Type: String
+    Description: IAM template URL
+  DBTemplateURL:
+    Type: String
+    Description: DB instance template URL
+  ALBTemplateURL:
+    Type: String
+    Description: ALB template URL
+  InstancesTemplateURL:
+    Type: String
+    Description: Instances template URL
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        VPCCidrBlock: !Ref VPCCidrBlock
+        PublicSubnetCidrBlock: !Ref PublicSubnetCidrBlock
+        PublicSubnetCidrBlock2: !Ref PublicSubnetCidrBlock2
+        PrivateSubnetCidrBlock: !Ref PrivateSubnetCidrBlock
+        PrivateSubnetCidrBlock2: !Ref PrivateSubnetCidrBlock2
+      TemplateURL: !Ref NetworkTemplateURL
+      TimeoutInMinutes: "5"
+  SecurityStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        SSHCidr: !Ref SSHCidr
+        VPCId: !Sub ${NetworkStack.Outputs.VPCId}
+      TemplateURL: !Ref SecurityTemplateURL
+      TimeoutInMinutes: "5"
+  IAMStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref IAMTemplateURL
+      TimeoutInMinutes: "5"
+  ALBStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        ALBSecurityGroupId: !Sub ${SecurityStack.Outputs.LoadBalancerSG}
+        ALBSubnets: !Join
+        - ','
+        - -  !Sub ${NetworkStack.Outputs.PublicSubnetID}
+          -  !Sub ${NetworkStack.Outputs.PublicSubnetID2}          
+        VPCId: !Sub ${NetworkStack.Outputs.VPCId}
+      TemplateURL: !Ref ALBTemplateURL
+      TimeoutInMinutes: "5"
+  DbStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref DBTemplateURL
+      TimeoutInMinutes: "5"
+      Parameters:
+        DBName: !Ref DBName
+        DBUsername: !Ref DBUsername
+        DBPassword: !Ref DBPassword
+        DBSecurityGroupID: !Sub ${SecurityStack.Outputs.DatabaseSG}
+        PrivateSubnetIds: !Join
+        - ','
+        - -  !Sub ${NetworkStack.Outputs.PrivateSubnetID}
+          -  !Sub ${NetworkStack.Outputs.PrivateSubnetID2}
+  InstancesStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Ref InstancesTemplateURL
+      TimeoutInMinutes: "5"
+      Parameters:
+        PrivateSubnetIds: !Join
+        - ','
+        - -  !Sub ${NetworkStack.Outputs.PrivateSubnetID}
+          -  !Sub ${NetworkStack.Outputs.PrivateSubnetID2}
+        DBName: !Ref DBName
+        DBUsername: !Ref DBUsername
+        DBPassword: !Ref DBPassword
+        DBDns: !Sub ${DbStack.Outputs.DbEndpoint}
+        InstanceSecurityGroupId: !Sub ${SecurityStack.Outputs.InstanceSG}
+        TargetGroupARN: !Sub ${ALBStack.Outputs.TargetARN}
+Outputs:
+  WebsiteURL:
+    Value: !Join
+    - ''
+    - -  http://
+      -  !Sub ${ALBStack.Outputs.ALBDns}
+    Description: WebSite URL

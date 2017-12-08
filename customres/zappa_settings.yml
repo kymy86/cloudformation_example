@@ -1,0 +1,19 @@
+---
+customres:
+  runtime: python3.6
+  debug: true
+  keep_warm: false
+  log_level: DEBUG
+  apigateway_enabled: false
+  project_name: secret_retriever
+  lambda_description: Create a Lambda function for retrieving secrets from SSM
+  timeout_seconds: 30
+  memory_size: 128
+  use_precompiled_packages: true
+  exclude:
+  - .vscode
+  - custom.yml
+  - venv
+  lambda_handler: lambda.get_cfn_secret
+  manage_roles: false
+  role_name: lambda_ssm_role

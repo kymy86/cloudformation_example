@@ -1,0 +1,61 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create RDS instance
+Parameters:
+  DBName:
+    Type: String
+    Description: Name of the DB
+  DBInstanceClass:
+    Type: String
+    Description: Instance class
+    Default: db.m4.large
+  AllocatedStorage:
+    Type: String
+    Description: Storage allocated for this instance
+    Default: "20"
+  DBUsername:
+    Type: String
+    NoEcho: True
+    MinLength: "6"
+    MaxLength: "64"
+    Description: Master DB username
+  DBPassword:
+    Type: String
+    NoEcho: True
+    Description: Master DB Password
+    MinLength: "6"
+  DBSecurityGroupID:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group for DB instance
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Subnets for the EC2 instances
+Resources:
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Main group
+      SubnetIds: !Ref PrivateSubnetIds
+      Tags:
+      - Key: Name
+        Value: Private DB Subnet group
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: !Ref DBName
+      AllocatedStorage: !Ref AllocatedStorage
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: MariaDB
+      EngineVersion: "10.0.24"
+      StorageType: gp2
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+      - !Ref DBSecurityGroupID
+Outputs:
+  DbEndpoint:
+    Value: !GetAtt DBInstance.Endpoint.Address
+    Description: Db Endpoint
+  DbPort:
+    Value: !GetAtt DBInstance.Endpoint.Port
+    Description: Db Endpoint Port

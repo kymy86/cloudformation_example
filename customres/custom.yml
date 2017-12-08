@@ -1,0 +1,14 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Custom resource which allow to create a custom environments variable in the Parameter store before going on with the CF stack creation.
+Resources:
+  DBPassword:
+    Type: Custom::EnvVariable
+    Properties:
+      ServiceToken: !Sub
+        arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:secret-retriever-customres
+      Name: DB_PASSWORD
+      Region: !Ref AWS::Region
+Outputs:
+  DatabasePassword:
+    Value: !GetAtt DBPassword.Secret
+  
