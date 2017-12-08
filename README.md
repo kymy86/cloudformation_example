@@ -11,7 +11,7 @@ In this folder you can find a cfn stack that creates an auto scaling group with 
 These configuration doesn't make any sense in a real scenario but it's useful for training purposes.
 An Application Load Balancer and a DynamoDB table are configured too. Finally, an instance profile is created to allow the autoscaling group instance to get access to Dynamo and CW.
 
-## 2. Customres
+## 2. customres
 
 In this folder you can find a cfn stack with a custom resource backed by a Lambda function. 
 This function gets the parameters from the EC2 Parameter Store and return them to the stack.
