@@ -176,7 +176,4 @@ Resources:
 Outputs:
   WebsiteURL:
     Description: URL For the LAMP stack
-    Value: !Join
-    - ''
-    - -  http://
-      -  !GetAtt WebServerInstance.PublicDnsName
+    Value: !Sub "http://${WebServerInstance.PublicDnsName}"

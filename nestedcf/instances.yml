@@ -149,16 +149,11 @@ Resources:
     Properties:
       ImageId: !FindInMap [AWSRegionArch2AMI, !Ref "AWS::Region", !FindInMap [AWSInstanceType2Arch, !Ref "InstanceType", Arch]]
       InstanceType: !Ref InstanceType
-      SecurityGroups: !Ref InstanceSecurityGroupId
+      SecurityGroups:
+      - !Ref InstanceSecurityGroupId
       UserData: 
         Fn::Base64: !Sub |
           #!/bin/bash -xe
           yum update -y aws-cfn-bootstrap
           /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource AppLaunchConfig --configsets wordpress_install --region ${AWS::Region}
           /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource WebServerGroup --region ${AWS::Region}
-Outputs:
-  WebsiteURL:
-    Value: !Join
-    - ''
-    - -  http://
-      -  !GetAtt TargetGroupARN.DNSName

@@ -136,10 +136,8 @@
         - Key: Name
           Value: !Sub |
             ${AWS::StackName} Nat Gateway
-      DependsOn: NATEIP
     PublicRouteTable:
       Type: AWS::EC2::RouteTable
-      DependsOn: AppVPC
       Properties:
         VpcId: !Ref AppVPC
         Tags:

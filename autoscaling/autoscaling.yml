@@ -144,6 +144,8 @@ Resources:
       Protocol: HTTP
   DynamoDBTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       TableName: "Image"
       AttributeDefinitions:
@@ -210,7 +212,7 @@ Resources:
         configure_dynamodb:
           files:
             /tmp/item.json:
-              content: !Sub |
+              content: |
                 {
                   "Image":{"S":"test.png"},
                   "Dimension":{"S":"500"},
@@ -230,7 +232,7 @@ Resources:
               php: []
           files:
             /var/www/html/index.php:
-              content: !Sub |
+              content: |
                 <?php echo "<h1>Cloudformation Sample application</h1>"?>
               mode: "000644"
               owner: apache
@@ -246,7 +248,7 @@ Resources:
               awslogs: []
           files:
             /tmp/file_to_log:
-              content: !Sub |
+              content: |
                 [/var/log/httpd/error_log]
                 datetime_format = %b %d %H:%M:%S
                 file = /var/log/httpd/error_log
@@ -280,7 +282,6 @@ Resources:
         Count: 2
     UpdatePolicy:
       AutoScalingRollingUpdate:
-        MinInstanceInService: 1
         MaxBatchSize: 1
         PauseTime: "PT15M"
         WaitOnResourceSignals: true
@@ -297,7 +298,4 @@ Resources:
       - !Ref ALBTargetGroup
 Outputs:
   ALBUrl:
-    Value: !Join
-    - ''
-    - -  "http://"
-      -  !GetAtt ApplicationLB.DNSName
+    Value: !Sub "http://${ApplicationLB.DNSName}"

@@ -1,9 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: Stack with ALB, Autoscaling group with Drupal, BastionHost and RDS
 Parameters:
-  KeyName:
-    Description: Key Pair Name
-    Type: AWS::EC2::KeyPair::KeyName
   VPCCidrBlock:
     Type: String
     Description: The VPC CIDR Block
@@ -149,8 +146,5 @@ Resources:
         TargetGroupARN: !Sub ${ALBStack.Outputs.TargetARN}
 Outputs:
   WebsiteURL:
-    Value: !Join
-    - ''
-    - -  http://
-      -  !Sub ${ALBStack.Outputs.ALBDns}
+    Value: !Sub "http://${ALBStack.Outputs.ALBDns}"
     Description: WebSite URL
