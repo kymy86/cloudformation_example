@@ -1,0 +1,107 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: | 
+  Setup AWS backup service. Resources to backup are selected by using the predefined tag "Environment"
+
+Parameters:
+  
+  Environment:
+    Type: String
+    Description: Environment where the resources will be provisioned
+    AllowedValues:
+    - dev
+    - test
+    - prod
+  
+  Project:
+    Type: String
+    Description: The application name
+  
+  SNSTopicArn:
+    Type: String
+    Description: SNS Topic ARN Where the backup action notifications are sent
+    Default: ''
+
+Conditions:
+
+  HasAlertTopic: !Not [!Equals [!Ref SNSTopicArn, '']]
+
+Resources:
+  
+  BackupVault: # cannot be deleted with data
+    Type: AWS::Backup::BackupVault
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BackupVaultName: !Sub ${Project}-${Environment}-backup-vault
+      Notifications: !If [HasAlertTopic, {BackupVaultEvents: [BACKUP_JOB_STARTED, BACKUP_JOB_COMPLETED, RESTORE_JOB_STARTED, RESTORE_JOB_COMPLETED, RECOVERY_POINT_MODIFIED], SNSTopicArn: !Ref SNSTopicArn}, !Ref 'AWS::NoValue']
+    
+  BackupVaultWeekly:
+    Type: AWS::Backup::BackupVault
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BackupVaultName: !Sub ${Project}-${Environment}-backup-vault-weekly
+      Notifications: !If [HasAlertTopic, {BackupVaultEvents: [BACKUP_JOB_STARTED, BACKUP_JOB_COMPLETED, RESTORE_JOB_STARTED, RESTORE_JOB_COMPLETED, RECOVERY_POINT_MODIFIED], SNSTopicArn: !Ref SNSTopicArn}, !Ref 'AWS::NoValue']
+
+  BackupVaultMonthly:
+    Type: AWS::Backup::BackupVault
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      BackupVaultName: !Sub ${Project}-${Environment}-backup-vault-monthly
+      Notifications: !If [HasAlertTopic, {BackupVaultEvents: [BACKUP_JOB_STARTED, BACKUP_JOB_COMPLETED, RESTORE_JOB_STARTED, RESTORE_JOB_COMPLETED, RECOVERY_POINT_MODIFIED], SNSTopicArn: !Ref SNSTopicArn}, !Ref 'AWS::NoValue']
+
+  BackupPlan:
+    Type: AWS::Backup::BackupPlan
+    Properties:
+      BackupPlan:
+        BackupPlanName: !Sub ${Project}-${Environment}-backup-plan
+        BackupPlanRule:
+        - CompletionWindowMinutes: 1440
+          Lifecycle:
+            DeleteAfterDays: 14
+          RuleName: !Sub ${Project}-${Environment}-backup-daily-rule
+          ScheduleExpression: cron(0 5 ? * * *) #every day
+          StartWindowMinutes: 60
+          TargetBackupVault: !Ref BackupVault
+        - CompletionWindowMinutes: 1440
+          Lifecycle:
+            DeleteAfterDays: 30
+          RuleName: !Sub ${Project}-${Environment}-backup-weekly-rule
+          ScheduleExpression: cron(0 5 ? * 1 *) #every week on Sunday
+          StartWindowMinutes: 60
+          TargetBackupVault: !Ref BackupVaultWeekly
+        - CompletionWindowMinutes: 1440
+          Lifecycle:
+            DeleteAfterDays: 120
+          RuleName: !Sub ${Project}-${Environment}-backup-monthly-rule
+          ScheduleExpression: cron(0 5 1 * ? *) #first day of month
+          StartWindowMinutes: 60
+          TargetBackupVault: !Ref BackupVaultMonthly
+    
+  BackupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: backup.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup
+      - arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores
+    
+  BackupSelection:
+    Type: AWS::Backup::BackupSelection
+    Properties:
+      BackupPlanId: !Ref BackupPlan
+      BackupSelection:
+        SelectionName: !Sub ${Project}-${Environment}-backup-selection
+        IamRoleArn: !GetAtt BackupRole.Arn
+        ListOfTags:
+        - ConditionValue: !Ref Environment
+          ConditionKey: Environment
+          ConditionType: STRINGEQUALS

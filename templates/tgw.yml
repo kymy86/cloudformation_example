@@ -1,0 +1,173 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create a Transit Gateway
+
+Parameters:
+
+  Account:
+    Type: String
+    Default: myaccount
+  
+  Project:
+    Type: String
+  
+  AmazonSideAsn:
+    Type: Number
+    Description: A private Autonomous System Number (ASN) for the Amazon side of a BGP session
+    Default: 64512
+    MinValue: 64512
+    MaxValue: 65534
+  
+  TGWDescription:
+    Type: String
+    Description: Transit Gateway Description
+
+  AutoAcceptSharedAttachments:
+    Type: String
+    Description: Indicates whether attachment requests are automatically accepted
+    Default: "disable"
+    AllowedValues: ["enable", "disable"]
+
+  DefaultRouteTableAssociation:
+    Type: String
+    Description: Enable or disable automatic association with the default association route table
+    Default: "enable"
+    AllowedValues: ["enable", "disable"]
+
+  DefaultRouteTablePropagation:
+    Type: String
+    Description: Enable or disable automatic propagation of routes to the default propagation route table
+    Default: "enable"
+    AllowedValues: ["enable", "disable"]
+
+  DnsSupport:
+    Type: String
+    Description: Enable or disable DNS support
+    Default: "enable"
+    AllowedValues: ["enable", "disable"]
+
+  VpnEcmpSupport:
+    Type: String
+    Description: Enable or disable Equal Cost Multipath Protocol
+    Default: "enable"
+    AllowedValues: ["enable", "disable"]
+
+  RootAccountId:
+    Type: Number
+    Description: Root account ID for Transit gateway sharing
+
+Conditions:
+  CreateNonDefaultRouteTable: !Equals [ !Ref DefaultRouteTablePropagation, "disable" ]
+
+Resources:
+
+  TransitGateway:
+    Type: "AWS::EC2::TransitGateway"
+    Properties:
+      AmazonSideAsn: !Ref AmazonSideAsn
+      Description: !Ref TGWDescription
+      AutoAcceptSharedAttachments: !Ref AutoAcceptSharedAttachments
+      DefaultRouteTableAssociation: !Ref DefaultRouteTableAssociation
+      DefaultRouteTablePropagation: !Ref DefaultRouteTablePropagation
+      DnsSupport: !Ref DnsSupport
+      VpnEcmpSupport: !Ref VpnEcmpSupport
+      Tags:
+      - Key: Name
+        Value: !Sub ${Account}-${Project}-tgw
+      - Key: Project
+        Value: !Ref Project
+      - Key: Account
+        Value: !Ref Account
+
+  TGWRouteTable:
+    Type: "AWS::EC2::TransitGatewayRouteTable"
+    Condition: CreateNonDefaultRouteTable
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
+      Tags:
+      - Key: Name
+        Value: !Sub ${Account}-${Project}-tgw-default-rt
+      - Key: Project
+        Value: !Ref Project
+      - Key: Account
+        Value: !Ref Account
+
+  TGWResourceShare:
+    Type: AWS::RAM::ResourceShare
+    Properties:
+      Name: !Sub ${Account}-${Project}-tgw
+      Principals:
+        - !Ref RootAccountId
+      ResourceArns:
+        - !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:transit-gateway/${TransitGateway}"
+      Tags:
+      - Key: Project
+        Value: !Ref Project
+      - Key: Account
+        Value: !Ref Account
+  
+  FlowLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: vpc-flow-logs.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Resource: arn:aws:logs:*:*:*
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            - logs:DescribeLogGroups
+            - logs:DescribeLogStreams
+  
+  VPCLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      RetentionInDays: 180
+      LogGroupName: !Sub /aws/${Project}-tgw-flowlog
+  
+  TransitGatewayFlowLogs:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogsRole.Arn
+      LogDestinationType: cloud-watch-logs
+      LogDestination: !GetAtt VPCLogGroup.Arn
+      MaxAggregationInterval: 60
+      ResourceId: !Ref TransitGateway
+      ResourceType: TransitGateway
+      Tags:
+      - Key: Project
+        Value: !Ref Project
+      - Key: Account
+        Value: !Ref Account
+      
+
+Outputs:
+  TGWId:
+    Description: TGWId of the newly created Transit Gateway
+    Value:
+      Ref: TransitGateway
+    Export:
+      Name:
+        !Sub "${AWS::StackName}-TgwID"
+
+  TGWRouteTableId:
+    Description: TGW Route Table ID of the newly created Transit Gateway
+    Condition: CreateNonDefaultRouteTable
+    Value:
+      Ref: TGWRouteTable
+    Export:
+      Name:
+        !Sub "${AWS::StackName}-TgwRT"

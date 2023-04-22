@@ -1,0 +1,253 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: EFS FileSystem with SecurityGroup and  MountTargets for each Subnet
+
+Parameters:
+  AccountName:
+    Type: String
+  CostCenter:
+    Type: String
+  Environment:
+    Type: String
+  Owner:
+    Type: String
+  Project:
+    Type: String
+  SubnetCidr1:
+    Type: String
+  SubnetCidr2:
+    Type: String
+  SubnetCidr3:
+    Type: String
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+  SubnetId3:
+    Type: AWS::EC2::Subnet::Id
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  TopicArn:
+    Type: String
+    Description: The ARN of the SNS topic where sending the alarms notification
+    Default: ""
+  
+
+Conditions:
+  HasAlertTopic: !Not [!Equals [!Ref TopicArn, '']]
+ 
+Resources:
+
+  EC2SecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: !Sub Security Group for ${Environment} EFS FileSystem
+      GroupName: !Sub ${Environment}-${Project}-efs-sg
+      SecurityGroupIngress: 
+        - CidrIp: !Ref SubnetCidr1
+          Description: Allow NFS connections from subnet
+          FromPort: 2049
+          IpProtocol: tcp
+          ToPort: 2049
+        - CidrIp: !Ref SubnetCidr2
+          Description: Allow NFS connections from subnet
+          FromPort: 2049
+          IpProtocol: tcp
+          ToPort: 2049
+        - CidrIp: !Ref SubnetCidr3
+          Description: Allow NFS connections from subnet
+          FromPort: 2049
+          IpProtocol: tcp
+          ToPort: 2049
+      Tags:
+        - Key: AccountName
+          Value: !Ref AccountName
+        - Key: CostCenter
+          Value: !Ref CostCenter
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub ${Environment}-${Project}-efs-sg
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+      VpcId: !Ref VpcId
+
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BackupPolicy:
+        Status: ENABLED
+      Encrypted: true
+      FileSystemTags: 
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub EFS-${Environment}
+        - Key: Project
+          Value: !!Ref Project
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref EFSFileSystem
+      SecurityGroups: 
+        - !Ref EC2SecurityGroup
+      SubnetId: !Ref SubnetId1
+  
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref EFSFileSystem
+      SecurityGroups: 
+        - !Ref EC2SecurityGroup
+      SubnetId: !Ref SubnetId2
+
+  EFSMountTarget3:
+    Type: AWS::EFS::MountTarget
+    Properties: 
+      FileSystemId: !Ref EFSFileSystem
+      SecurityGroups: 
+        - !Ref EC2SecurityGroup
+      SubnetId: !Ref SubnetId3
+  
+  EFSFileSystemBurstCreditBalanceTooLowAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: 'Average burst credit balance over last 10 minutes too low, expect a significant performance drop soon.'
+      Namespace: 'AWS/EFS'
+      MetricName: BurstCreditBalance
+      Statistic: Average
+      Period: 600
+      EvaluationPeriods: 1
+      ComparisonOperator: LessThanThreshold
+      Threshold: 192000000000 # 192 GB in Bytes (last hour where you can burst at 100 MB/sec)
+      AlarmActions:
+      - !Ref TopicArn
+      Dimensions:
+      - Name: FileSystemId
+        Value: !Ref EFSFileSystem
+  
+  EFSFileSystemPercentIOLimitTooHighAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: 'I/O limit has been reached, consider using Max I/O performance mode.'
+      Namespace: 'AWS/EFS'
+      MetricName: PercentIOLimit
+      Statistic: Maximum
+      Period: 600
+      EvaluationPeriods: 3
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 95
+      AlarmActions:
+      - !Ref TopicArn
+      Dimensions:
+      - Name: FileSystemId
+        Value: !Ref EFSFileSystem
+
+  EFSFileSystemThroughputAlarm: # https://docs.aws.amazon.com/efs/latest/ug/monitoring-metric-math.html#metric-math-throughput-utilization
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: 'Reached 80% of the permitted throughput 6 times over last 10 minutes.'
+      Metrics:
+      - Id: m1
+        Label: MeteredIOBytes
+        MetricStat:
+          Metric:
+            Namespace: 'AWS/EFS'
+            MetricName: MeteredIOBytes
+            Dimensions:
+            - Name: FileSystemId
+              Value: !Ref EFSFileSystem
+          Period: 60
+          Stat: Sum
+          Unit: Bytes
+        ReturnData: false
+      - Id: m2
+        Label: PermittedThroughput
+        MetricStat:
+          Metric:
+            Namespace: 'AWS/EFS'
+            MetricName: PermittedThroughput
+            Dimensions:
+            - Name: FileSystemId
+              Value: !Ref EFSFileSystem
+          Period: 60
+          Stat: Sum
+          Unit: 'Bytes/Second'
+        ReturnData: false
+      - Expression: '(m1/1048576)/PERIOD(m1)'
+        Id: e1
+        Label: e1
+        ReturnData: false
+      - Expression: 'm2/1048576'
+        Id: e2
+        Label: e2
+        ReturnData: false
+      - Expression: '((e1)*100)/(e2)'
+        Id: e3
+        Label: 'Throughput utilization (%)'
+        ReturnData: true
+      EvaluationPeriods: 10
+      DatapointsToAlarm: 6
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 80
+      AlarmActions:
+      - !Ref TopicArn
+
+Outputs:
+
+  EC2SecurityGroupId:
+    Description: Security Group Id
+    Value: !GetAtt EC2SecurityGroup.GroupId
+    Export:
+      Name: !Sub ${AWS::StackName}-sg-id
+  EFSFileSystemArn:
+    Description: EFS File System Arn
+    Value: !GetAtt EFSFileSystem.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-efs-arn
+  EFSFileSystemId:
+    Description: EFS File System Id
+    Value: !GetAtt EFSFileSystem.FileSystemId
+    Export:
+      Name: !Sub ${AWS::StackName}-efs-id
+  EFSMountTarget1Id:
+    Description: EFS Mount Target 1 Id
+    Value: !GetAtt EFSMountTarget1.Id
+    Export:
+      Name: !Sub ${AWS::StackName}-efs-mt1-id
+  EFSMountTarget1IpAddress:
+    Description: EFS Mount Target 1 Ip Address
+    Value: !GetAtt EFSMountTarget1.IpAddress
+    Export:
+      Name: !Sub ${AWS::StackName}-efs-mt1-ip
+  EFSMountTarget2Id:
+    Description: EFS Mount Target 2 Id
+    Value: !GetAtt EFSMountTarget2.Id
+    Export:
+      Name: !Sub ${AWS::StackName}-efs-mt2-id
+  EFSMountTarget2IpAddress:
+    Description: EFS Mount Target 2 Ip Address
+    Value: !GetAtt EFSMountTarget2.IpAddress
+    Export:
+      Name: !Sub ${AWS::StackName}-efs-mt2-ip
+  EFSMountTarget3Id:
+    Description: EFS Mount Target 3 Id
+    Value: !GetAtt EFSMountTarget3.Id
+    Export:
+      Name: !Sub ${AWS::StackName}-efs-mt3-id
+  EFSMountTarget3IpAddress:
+    Description: EFS Mount Target 3 Ip Address
+    Value: !GetAtt EFSMountTarget3.IpAddress
+    Export:
+      Name: !Sub ${AWS::StackName}-efs-mt3-ip
+

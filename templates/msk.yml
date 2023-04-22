@@ -1,0 +1,107 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template creates a MSK cluster
+
+Parameters:
+
+  Environment:
+    Type: String
+
+  Project:
+    Type: String
+  
+  KMSKeyID:
+    Type: String
+
+  SubnetIDs:
+    Description: Subnet ID
+    Type: "List<AWS::EC2::Subnet::Id>"
+  
+  VPCCidr:
+    Type: String
+    Description: VPC CIDR
+  
+  VPC:
+    Description: Select VPC
+    Type: "AWS::EC2::VPC::Id"
+  
+  BrokerNodes:
+    Type: String
+    Default: 2
+  
+  InstanceType:
+    Type: String
+    Default: kafka.t3.small
+  
+  KafkaVersion:
+    Type: String
+    Default: "2.8.1"
+
+
+Resources:
+
+  BrokerLogGroup:
+    Type: AWS::Logs::LogGroup
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Delete
+    Properties:
+      RetentionInDays: 1827
+  
+  ClusterSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Initial VPC enabled
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 9092
+          ToPort: 9092
+          CidrIp: !Ref VPCCidr
+        - IpProtocol: "tcp"
+          FromPort: 9094
+          ToPort: 9094
+          CidrIp: !Ref VPCCidr
+        - IpProtocol: "tcp"
+          FromPort: 9096
+          ToPort: 9096
+          CidrIp: !Ref VPCCidr
+        - IpProtocol: "tcp"
+          FromPort: 9098
+          ToPort: 9098
+          CidrIp: !Ref VPCCidr
+        - IpProtocol: "tcp"
+          FromPort: 2181
+          ToPort: 2182
+          CidrIp: !Ref VPCCidr
+
+  Cluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      ClusterName: !Sub ${Project}-${Environment}-msk
+      KafkaVersion: !Ref KafkaVersion
+      BrokerNodeGroupInfo:
+        ClientSubnets:
+        - !Select [0, !Ref SubnetIDs]
+        - !Select [1, !Ref SubnetIDs]
+        InstanceType: !Ref InstanceType
+        SecurityGroups:
+        - !Ref ClusterSecurityGroup
+      EncryptionInfo:
+        EncryptionAtRest: 
+          DataVolumeKMSKeyId: !Ref KMSKeyID
+        EncryptionInTransit:
+          ClientBroker: TLS
+          InCluster: true
+      LoggingInfo:
+        BrokerLogs:
+          CloudWatchLogs:
+            Enabled: true
+            LogGroup: !Ref BrokerLogGroup
+      NumberOfBrokerNodes: !Ref BrokerNodes
+      Tags:
+        {
+          Name: !Sub "${Project}-${Environment}-msk",
+          Environment: !Ref Environment,
+          Project: !Ref Project
+        }
+      

@@ -1,0 +1,267 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: | 
+  This template create a customizable DynamoDB table.
+  The KMS key used to encrypt the table is imported from another CloudFormation Stack
+
+Parameters:
+
+  Environment:
+    Type: String
+    Description: Environment where the resources will be provisioned
+    AllowedValues:
+    - dev
+    - pro
+    - int
+
+  Application:
+    Type: String
+    Description: The Project name
+  
+  KMSStackName:
+    Type: String
+    Description: KMS key is imported from a CloudFormation Stack where the KMS resource is created.
+  
+  #DynamoDB Table properties
+
+  TableName:
+    Type: String
+    Description: DynamoDB table name
+  
+  BillingMode:
+    Type: String
+    Description: DynamoDB billing mode
+    AllowedValues:
+    - PROVISIONED
+    - PAY_PER_REQUEST
+    Default: PAY_PER_REQUEST
+
+  WriteCapacityUnits:
+    Type: Number
+    Description: Write capacity units if billing mode is provisioned
+    Default: 5
+  
+  ReadCapacityUnits:
+    Type: Number
+    Description: Read capacity units if billing mode is provisioned
+    Default: 5
+  
+  ThrottleRequestsThreshold:
+    Type: Number
+    Description: The threshold beyond which the alarm si triggered
+    Default: 5
+  
+  HashKey:
+    Type: String
+    Description: Table Hash key
+  
+  RangeKey:
+    Type: String
+    Description: Table range key (if any)
+    Default: ''
+
+  SNSTopicArn:
+    Type: String
+    Description: SNS Topic ARN Where the backup action notifications are sent
+    Default: ''
+  
+  BackupTagKey1:
+    Description: key of the tag that should be added to sign up this resouce to be backupped via aws backup, leave empty if you want no backup tags
+    Type: String
+    Default: "Backup"
+
+  BackupTagValue1:
+    Description: value of the tag that should be added to sign up this resouce to be backupped via aws backup, leave empty if you want no backup tags
+    Type: String
+    Default: "Daily-5AM-UTC"
+
+  BackupTagKey2:
+    Description: key of the tag that should be added to sign up this resouce to be backupped via aws backup, leave empty if you want no backup tags
+    Type: String
+    Default: "Backup-Retention"
+
+  BackupTagValue2:
+    Description: value of the tag that should be added to sign up this resouce to be backupped via aws backup, leave empty if you want no backup tags
+    Type: String
+    Default: "14day-Retention"
+  
+  Project:
+    Type: String
+    Description: The tag about which project the stack is about
+
+Conditions:
+  IsProvisionedMode: !Equals [ !Ref BillingMode, PROVISIONED ]
+  HasAlertTopic: !Not [!Equals [!Ref SNSTopicArn, '']]
+  #This is required only for alarms that are triggered when the capacity units are exceeded
+  EnableAlarm: !And [ !Condition IsProvisionedMode, !Condition HasAlertTopic ]
+  HasRangeKey: !Not [!Equals [!Ref RangeKey, ""]]
+
+  #Enable DynamoDB backup
+  EnableBackup: !And
+  - !Not [ !Equals [ !Ref BackupTagKey1, "" ] ]
+  - !Not [ !Equals [ !Ref BackupTagKey2, "" ] ]
+  - !Not [ !Equals [ !Ref BackupTagValue1, "" ] ]
+  - !Not [ !Equals [ !Ref BackupTagValue2, "" ] ]
+
+
+Resources:
+######################################### Microservice table ########################################################
+
+  ServiceTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Ref TableName
+      BillingMode: !Ref BillingMode
+      TimeToLiveSpecification: 
+        AttributeName: TimeToLive
+        Enabled: true
+      ProvisionedThroughput: !If [IsProvisionedMode, {ReadCapacityUnits: !Ref ReadCapacityUnits, WriteCapacityUnits: !Ref WriteCapacityUnits}, !Ref 'AWS::NoValue']
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        KMSMasterKeyId:
+          Fn::ImportValue: !Sub ${KMSStackName}-KMSKeyArn
+        SSEEnabled: true
+        SSEType: KMS
+      AttributeDefinitions:
+      - AttributeName: !Ref HashKey
+        AttributeType: S
+      - !If 
+        - HasRangeKey
+        - AttributeName: !Ref RangeKey
+          AttributeType: S
+        - !Ref AWS::NoValue
+      KeySchema:
+      - AttributeName: !Ref HashKey
+        KeyType: HASH
+      - !If 
+        - HasRangeKey
+        - AttributeName: !Ref RangeKey
+          KeyType: RANGE
+        - !Ref AWS::NoValue
+      Tags:
+      - Key: Project
+        Value: !Ref Project
+      - Key: Application
+        Value: !Ref Application
+      - Key: Environment
+        Value: !Ref Environment
+      - Fn::If: 
+        - EnableBackup
+        - Key: !Ref BackupTagKey1
+          Value: !Ref BackupTagValue1
+        - !Ref AWS::NoValue
+      - Fn::If: 
+        - EnableBackup
+        - Key: !Ref BackupTagKey2
+          Value: !Ref BackupTagValue2
+        - !Ref AWS::NoValue
+  
+  ######################################### Dynamodb Table alarms ########################################################
+ 
+  ReadThrottleEventsAlarm:
+    Condition: EnableAlarm
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Reads are throttled. Lower ReadCapacityUnitsUtilizationTarget or increase MaxReadCapacityUnits.
+      Namespace: 'AWS/DynamoDB'
+      MetricName: ReadThrottleEvents
+      Dimensions:
+      - Name: TableName
+        Value: !Ref ServiceTable
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: !Ref ReadCapacityUnits
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+      - !Ref SNSTopicArn
+      OKActions:
+      - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+  WriteThrottleEventsAlarm:
+    Condition: EnableAlarm
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: 'Writes are throttled. Lower WriteCapacityUnitsUtilizationTarget or increase MaxWriteCapacityUnits.'
+      Namespace: AWS/DynamoDB
+      MetricName: WriteThrottleEvents
+      Dimensions:
+      - Name: TableName
+        Value: !Ref ServiceTable
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: !Ref WriteCapacityUnits
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+      - !Ref SNSTopicArn
+      OKActions:
+      - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+  ThrottledRequestsEventsAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Batch requests are throttled. Lower {Read/Write} CapacityUnitsUtilizationTarget or increase Max{Read/Write}CapacityUnits.
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions:
+      - Name: TableName
+        Value: !Ref ServiceTable
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: !Ref ThrottleRequestsThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+      - !Ref SNSTopicArn
+      OKActions:
+      - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+  UserErrorsAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: 'User errors'
+      Namespace: 'AWS/DynamoDB'
+      MetricName: UserErrors
+      Dimensions:
+      - Name: TableName
+        Value: !Ref ServiceTable
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+      - !Ref SNSTopicArn
+      OKActions:
+      - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+  SystemErrorsAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: 'System errors'
+      Namespace: 'AWS/DynamoDB'
+      MetricName: SystemErrors
+      Dimensions:
+      - Name: TableName
+        Value: !Ref ServiceTable
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+      - !Ref SNSTopicArn
+      OKActions:
+      - !Ref SNSTopicArn
+      TreatMissingData: notBreaching

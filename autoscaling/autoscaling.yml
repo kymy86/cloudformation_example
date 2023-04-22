@@ -1,36 +1,42 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Parameters:
   RegionVPC:
-    Default: vpc-c3add4a7
     Description: The ID of the VPC where the autoscaling group will be created
     Type: AWS::EC2::VPC::Id
   Subnet1:
-    Default: subnet-9c8212a1
     Type: AWS::EC2::Subnet::Id
     Description: The ID Of the first subnet
   Subnet2:
-    Default: subnet-e49a5bbc
     Type: AWS::EC2::Subnet::Id
     Description: The ID Of the second subnet
   Subnet3:
-    Default: subnet-7818ab74
     Type: AWS::EC2::Subnet::Id
     Description: The ID Of the third subnet
-  KeyPair:
-    Type: AWS::EC2::KeyPair::KeyName
-    Description: Key pair for accessing the instances in the ASG
-    Default: testkey
   InstanceType:
     Type: String
-    Default: t2.micro
+    Default: t3.micro
     Description: ASG instance type
+  KmsKeyArn:
+    Type: String
+    Description: ARN for the KMS key used to encrypt the ebs volumes
+  Environment:
+    Type: String
+    Description: Application environment
+    Default: noprd
+  Project:
+    Type: String
+    Description: Project name
+    Default: multiprp-app
+
 Mappings:
   AMI2Region:
     us-east-1:
       "1": ami-55ef662f
     us-west-1:
       "1": ami-a51f27c5
+
 Resources:
+
   InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -42,6 +48,10 @@ Resources:
             Service:
             - ec2.amazonaws.com
           Effect: Allow
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
   RolePolicy:
     Type: AWS::IAM::Policy
     Properties:
@@ -49,28 +59,35 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-        - Action: 
-          - "s3:*"
-          Effect: Allow
-          Resource:
-          - "*"
         - Action:
-          - "dynamodb:*"
+          - dynamodb:*Item
+          - dynamodb:DescribeTable
+          - dynamodb:Query
+          - dynamodb:Scan
+          - dynamodb:PutItem
           Effect: Allow
           Resource:
-          - "*"
+          - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTable}"
         - Action:
-          - "cloudwatch:*"
+          - logs:CreateLogGroup
+          - logs:CreateLogStream
+          - logs:PutLogEvents
           Effect: Allow
+          Resource: arn:aws:logs:*:*:*
+        - Effect: Allow
+          Action:
+            - kms:Decrypt
+            - kms:GenerateDataKey
+            - kms:Encrypt
+            - kms:ReEncrypt*
+            - kms:GenerateDataKey*
+            - kms:DescribeKey
+            - kms:CreateGrant
           Resource:
-          - "*"
-        - Action:
-          - "logs:*"
-          Effect: Allow
-          Resource:
-          - "*"
+            - !Ref KmsKeyArn
       Roles: 
         - !Ref InstanceRole
+
   ASGInstanceProfile:
     Type: AWS::IAM::InstanceProfile
     Properties:
@@ -78,6 +95,7 @@ Resources:
       Roles:
         - !Ref InstanceRole
       InstanceProfileName: DynamoCWRole
+
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -90,8 +108,12 @@ Resources:
           CidrIp: 0.0.0.0/0
       Tags: 
         - Key: Name
-          Value: !Sub | 
-            ${AWS::StackName} ALB SG
+          Value: !Sub ${AWS::StackName}-alb-sg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref Project
+  
   ASGSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -109,8 +131,12 @@ Resources:
         CidrIp: 0.0.0.0/0
       Tags:
         - Key: Name
-          Value: !Sub |
-            ${AWS::StackName} ASG instances SG
+          Value: !Sub ${AWS::StackName}-ec2--sg
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref Project
+
   ApplicationLB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -121,6 +147,12 @@ Resources:
         - !Ref Subnet1
         - !Ref Subnet2
         - !Ref Subnet3
+      Tags:
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project
+
   ALBTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -133,6 +165,7 @@ Resources:
       Port: 80
       Protocol: HTTP
       VpcId: !Ref RegionVPC
+
   ALBListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -142,12 +175,17 @@ Resources:
       LoadBalancerArn: !Ref ApplicationLB
       Port: 80
       Protocol: HTTP
+
   DynamoDBTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
       TableName: "Image"
+      SSESpecification:
+        KMSMasterKeyId: !!Ref KmsKeyArn
+        SSEType: KMS
+        SSEEnabled: true
       AttributeDefinitions:
       - AttributeName: "ImageId"
         AttributeType: "S"
@@ -157,21 +195,57 @@ Resources:
       ProvisionedThroughput:
         ReadCapacityUnits: 5
         WriteCapacityUnits: 5
-  WPLaunchConfiguration:
-    Type: AWS::AutoScaling::LaunchConfiguration
+      Tags:
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project
+  
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
     Properties:
-      IamInstanceProfile: !Ref ASGInstanceProfile
-      ImageId: !FindInMap ["AMI2Region", !Ref "AWS::Region", "1"]
-      InstanceType: !Ref InstanceType
-      KeyName: !Ref KeyPair
-      SecurityGroups:
-      - !Ref ASGSecurityGroup
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash -xe
-          yum update -y aws-cfn-bootstrap
-          /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --region ${AWS::Region} --resource WPLaunchConfiguration --configsets appInstall
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --region ${AWS::Region} --resource WPAutoScalingGroup
+      LaunchTemplateName: !Sub ${Environment}-${Project}-launchtemplate
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: "/dev/xvda"
+            Ebs:
+              VolumeType: "gp3"
+              DeleteOnTermination: "true"
+              VolumeSize: 20
+              Encrypted: true
+              KmsKeyId: !Ref KmsKeyArn
+        DisableApiTermination: false
+        EbsOptimized: false
+        ImageId: !FindInMap ["AMI2Region", !Ref "AWS::Region", "1"]
+        InstanceInitiatedShutdownBehavior: stop
+        IamInstanceProfile: 
+            Arn: !GetAtt ASGInstanceProfile.Arn
+        InstanceType: !Ref InstanceType
+        SecurityGroupIds:
+        - !Ref ASGSecurityGroup
+        TagSpecifications:
+        - ResourceType: volume
+          Tags:
+          - Key: Environment
+            Value: !Ref Environment
+          - Key: Name
+            Value: !Sub ${Environment}-${Project}-ebs-vol
+          - Key: Project
+            Value: !Ref Project
+        - ResourceType: instance
+          Tags:
+          - Key: Environment
+            Value: !Ref Environment
+          - Key: Name
+            Value: !Sub ${Environment}-${Project}-ebs-vol
+          - Key: Project
+            Value: !Ref Project
+        UserData: 
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            yum update -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --region ${AWS::Region} --resource WPLaunchConfiguration --configsets appInstall
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --region ${AWS::Region} --resource WPAutoScalingGroup
     Metadata:
       AWS::CloudFormation::Init:
         configSets:
@@ -274,6 +348,7 @@ Resources:
               awslogs:
                 enabled: true
                 ensureRunning: true
+  
   WPAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     CreationPolicy:
@@ -285,17 +360,38 @@ Resources:
         MaxBatchSize: 1
         PauseTime: "PT15M"
         WaitOnResourceSignals: true
+        SuspendProcesses:
+        - HealthCheck
+        - ReplaceUnhealthy
+        - AZRebalance
+        - AlarmNotification
+        - ScheduledActions
     Properties:
       VPCZoneIdentifier: 
       - !Ref Subnet1
       - !Ref Subnet2
       - !Ref Subnet3
-      LaunchConfigurationName: !Ref WPLaunchConfiguration
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
       MinSize: 1
       MaxSize: 3
       DesiredCapacity: 2
+      Cooldown: 60
       TargetGroupARNs:
       - !Ref ALBTargetGroup
+      Tags:
+      - Key: Environment
+        Value: !Ref Environment
+        PropagateAtLaunch: true
+      - Key: Name
+        Value: !Sub ${Environment}-${Project}-asg
+        PropagateAtLaunch: true
+      - Key: Project
+        Value: !Ref Project
+        PropagateAtLaunch: true
+
+
 Outputs:
   ALBUrl:
     Value: !Sub "http://${ApplicationLB.DNSName}"

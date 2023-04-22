@@ -1,0 +1,384 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  With this template you can create an EC2 instance that monitor a Direct Connect connection.
+  The purpose of this instance is described in this blog post --> https://aws.amazon.com/blogs/networking-and-content-delivery/debugging-tool-for-network-connectivity-from-amazon-vpc/
+  where the same instance is created through a SSM document (AWSSupport-SetupIPMonitoringFromVPC).
+  To make it easy to manage the instance, this template translates the instructions in the SSM document to a valid Cloudformation template
+Parameters:
+  AccountName:
+    Type: String
+  Environment:
+    Type: String
+    AllowedValues:
+    - prod
+  Project:
+    Type: String
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: The VPC ID for the monitor instance
+  SubnetId: 
+    Type: AWS::EC2::Subnet::Id
+    Description: The subnet ID for the monitor instance
+  TargetIP:
+    Type: String
+    Description: Target IP
+    AllowedPattern: ^[0-9a-fA-F.:,]{6,255}$
+  CloudWatchLogGroupNamePrefix:
+    Type: String
+    Description: Prefix used for each CloudWatch log group created for the test results.
+    Default: SetupIPMonitoringFromVPC
+    AllowedPattern: ^[0-9a-zA-Z_.#/\\-]{1,512}$
+  CloudWatchLogGroupRetentionInDays:
+    Type: String
+    Description:  Number of days you want to keep the network monitoring results for.
+    Default: 7
+  InstanceType:
+    Type: String
+    Description: The EC2 instance type for the test instance.
+    Default: t3.small
+  SSMKMSKeyArn:
+    Type: String
+    Description: KMS Arn used to encrypt SSM sessions
+  EBSKMSKeyArn:
+    Type: String
+    Description: KMS Key used to encrypt the ebs disk (the AWS default one has been used as default)
+
+Mappings:
+  ImageIds:
+    eu-south-1:
+      "linux2": ami-0b6321d6ee7c8ab67
+
+Resources:
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group used by the monitoring instance"
+      GroupName: !Sub ${AccountName}-${Project}-${Environment}-test-sg
+      VpcId: !Ref VPCId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: "0.0.0.0/0"
+
+  MonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AccountName}-${Project}-${Environment}-monitoring-role
+      Description: Role used by the monitoring instance
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ssm.amazonaws.com
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+      - PolicyName: custom-policy
+        PolicyDocument: 
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:PutMetricFilter
+            - logs:PutRetentionPolicy
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:DescribeLogGroups
+            - logs:DescribeLogStreams
+            - logs:PutLogEvents
+            Resource:
+            - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${CloudWatchLogGroupNamePrefix}/*"
+          - Effect: Allow
+            Action: 
+            - kms:Decrypt
+            - kms:Encrypt
+            - kms:DescribeKey
+            Resource:
+            - !Ref SSMKMSKeyArn
+          - Effect: Allow
+            Action:
+            - kms:ListKeys
+            - kms:ListAliases
+            Resource: 
+            - "*"
+  
+  MonitoringIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - !Ref MonitoringRole
+  
+  TestInstance:
+    Type: AWS::EC2::Instance
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          default:
+          - 01_setupCfnHup
+          - 02_config-amazon-cloudwatch-agent
+          - 03_restart_amazon-cloudwatch-agent
+          - 04_setupMonitFiles
+          - 05_logrotate-config
+          - 06_cw-logs-metrics-filters-config
+          UpdateEnvironment:
+          - 02_config-amazon-cloudwatch-agent
+          - 03_restart_amazon-cloudwatch-agent
+        02_config-amazon-cloudwatch-agent:
+          files:
+            '/home/ec2-user/cloudwatchagent.json':
+              content: !Sub |
+                {
+                  "logs":{
+                    "logs_collected": {
+                      "files": {
+                        "collect_list": [
+                          {
+                            "file_path": "/home/ec2-user/logs/mtr.txt",
+                            "log_group_name": "/${CloudWatchLogGroupNamePrefix}/mtr-from-${SubnetId}",
+                            "log_stream_name": "{local_hostname}-{hostname}-{instance_id}-mtr",
+                            "timezone":"UTC",
+                            "retention_in_days": ${CloudWatchLogGroupRetentionInDays}
+                          },
+                          {
+                            "file_path": "/home/ec2-user/logs/ping1500.txt",
+                            "log_group_name": "/${CloudWatchLogGroupNamePrefix}/ping1500-from-${SubnetId}",
+                            "log_stream_name": "{local_hostname}-{hostname}-{instance_id}-ping1500",
+                            "timezone":"UTC",
+                            "multi_line_start_pattern":"---.*",
+                            "retention_in_days": ${CloudWatchLogGroupRetentionInDays}
+                          },
+                          {
+                            "file_path": "/home/ec2-user/logs/ping64.txt",
+                            "log_group_name": "/${CloudWatchLogGroupNamePrefix}/ping64-from-${SubnetId}",
+                            "log_stream_name": "{local_hostname}-{hostname}-{instance_id}-ping64",
+                            "timezone":"UTC",
+                            "multi_line_start_pattern":"---.*",
+                            "retention_in_days": ${CloudWatchLogGroupRetentionInDays}
+                          },
+                          {
+                            "file_path": "/home/ec2-user/logs/tracepath.txt",
+                            "log_group_name": "/${CloudWatchLogGroupNamePrefix}/tracepath-from-${SubnetId}",
+                            "log_stream_name": "{local_hostname}-{hostname}-{instance_id}-tracepath",
+                            "timezone":"UTC",
+                            "multi_line_start_pattern":"1?:.*",
+                            "retention_in_days": ${CloudWatchLogGroupRetentionInDays}
+                          },
+                          {
+                            "file_path": "/home/ec2-user/logs/traceroutetcp.txt",
+                            "log_group_name": "/${CloudWatchLogGroupNamePrefix}/traceroutetcp-from-${SubnetId}",
+                            "log_stream_name": "{local_hostname}-{hostname}-{instance_id}-traceroutetcp",
+                            "timezone":"UTC",
+                            "multi_line_start_pattern":"traceroute",
+                            "retention_in_days": ${CloudWatchLogGroupRetentionInDays}
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+          commands:
+            01_create_logs_dir:
+              command: |
+                mkdir /home/ec2-user/logs
+                chown ec2-user:ec2-user /home/ec2-user/logs
+        03_restart_amazon-cloudwatch-agent:
+          commands:
+            01_stop_service:
+              command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a stop
+            02_start_service:
+              command: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/home/ec2-user/cloudwatchagent.json -s
+        01_setupCfnHup:
+          files:
+            '/etc/cfn/cfn-hup.conf':
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+                interval=1
+              mode: '000400'
+              owner: root
+              group: root
+            '/etc/cfn/hooks.d/amazon-cloudwatch-agent-auto-reloader.conf':
+               content: !Sub |
+                 [cfn-auto-reloader-hook]
+                 triggers=post.update
+                 path=Resources.TestInstance.Metadata.AWS::CloudFormation::Init.02_config-amazon-cloudwatch-agent
+                 action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackId} --resource TestInstance --region ${AWS::Region} --configsets UpdateEnvironment
+                 runas=root
+               mode: '000400'
+               owner: root
+               group: root
+            "/lib/systemd/system/cfn-hup.service":
+              content: |
+                [Unit]
+                Description=cfn-hup daemon
+                [Service]
+                Type=simple
+                ExecStart=/opt/aws/bin/cfn-hup
+                Restart=always
+                [Install]
+                WantedBy=multi-user.target
+          commands:
+            01enable_cfn_hup:
+              command: |
+                systemctl enable cfn-hup.service
+            02start_cfn_hup:
+              command: |
+                systemctl start cfn-hup.service
+        04_setupMonitFiles:
+          files:
+            '/home/ec2-user/mtr.sh':
+              content: !Sub |
+                #!/bin/bash
+                sudo /sbin/mtr -rn -c 30 ${TargetIP} | sed 's/Start: //g' |  sed -e "2,$ s/^/     /" >> /home/ec2-user/logs/mtr.txt
+              mode: 744
+              owner: ec2-user
+              group: ec2-user
+            '/home/ec2-user/ping64.sh':
+              content: !Sub |
+                #!/bin/bash
+                ping -s 56 -c 30 ${TargetIP} | sed -e "1,$ s/^/     /" | sed "s/%//g" | tail -n 3 | sed "s#/# #g"  >> /home/ec2-user/logs/ping64.txt
+              mode: 744
+              owner: ec2-user
+              group: ec2-user
+            '/home/ec2-user/ping1500.sh':
+              content: !Sub |
+                #!/bin/bash
+                ping -s 1472 -c 30 ${TargetIP} | sed -e "1,$ s/^/     /" | sed "s/%//g" | tail -n 3 | sed "s#/# #g"  >> /home/ec2-user/logs/ping1500.txt
+              mode: 744
+              owner: ec2-user
+              group: ec2-user
+            '/home/ec2-user/tracepath.sh':
+              content: !Sub |
+                #!/bin/bash
+                tracepath -n ${TargetIP} | grep -v "Too many hops" | sed -e "$ ! s/^/     /" >> /home/ec2-user/logs/tracepath.txt
+              mode: 744
+              owner: ec2-user
+              group: ec2-user
+            '/home/ec2-user/traceroutetcp.sh':
+              content: !Sub |
+                #!/bin/bash
+                sudo traceroute -n ${TargetIP} -q 2 -A -T -p 80 | sed -e "s/^/     /" >> /home/ec2-user/logs/traceroutetcp.txt
+              mode: 744
+              owner: ec2-user
+              group: ec2-user
+          commands:
+            01_create_cron_conf:
+              command: |
+                touch /home/ec2-user/cronConf.txt
+                echo "* * * * * /home/ec2-user/mtr.sh" >> /home/ec2-user/cronConf.txt
+                echo "* * * * * /home/ec2-user/ping1500.sh" >> /home/ec2-user/cronConf.txt
+                echo "* * * * * /home/ec2-user/ping64.sh" >> /home/ec2-user/cronConf.txt
+                echo "* * * * * /home/ec2-user/traceroutetcp.sh" >> /home/ec2-user/cronConf.txt
+                echo "* * * * * /home/ec2-user/tracepath.sh" >> /home/ec2-user/cronConf.txt
+            02_setup_cron:
+              command: crontab -u ec2-user /home/ec2-user/cronConf.txt
+        05_logrotate-config:
+          files:
+            '/etc/logrotate.d/logrotateConfig.conf':
+              content: |
+                /home/ec2-user/logs/*.txt {
+                  daily
+                  missingok
+                  size 5M
+                  start 1
+                  rotate 4
+                }
+              mode: 644
+              owner: root
+              group: root
+          commands:
+            01_logratate_settings:
+              command: |
+                sed -i 's/dateext/#dateext/g' /etc/logrotate.conf
+                logrotate -vf /etc/logrotate.d/logrotateConfig.conf
+        06_cw-logs-metrics-filters-config:
+          files:
+            '/tmp/packet_loss_metric_filter.json':
+              content: !Sub | 
+                [
+                  {
+                    "metricName": "${TargetIP} Packet Loss",
+                    "metricNamespace": "CloudWatchLogGroupNamePrefix/${SubnetId}",
+                    "metricValue": "$LOSS",
+                    "defaultValue":100
+                  }
+                ]
+              mode: 644
+              owner: root
+              group: root
+            '/tmp/latency_metric_filter.json':
+              content: !Sub |
+                [
+                  {
+                    "metricName": "${TargetIP} Latency",
+                    "metricNamespace": "CloudWatchLogGroupNamePrefix/${SubnetId}",
+                    "metricValue": "$AVG",
+                    "defaultValue":0
+                  }
+                ]
+              mode: 644
+              owner: root
+              group: root
+          commands:
+            01_setup_metrics_filter:
+              command: !Sub |
+                sleep 120
+                log_group_name="/${CloudWatchLogGroupNamePrefix}/ping64-from-${SubnetId}"
+                
+                aws logs put-metric-filter --log-group-name $log_group_name \
+                  --filter-name "packet_loss" \
+                  --filter-pattern "[r1,r2,r3,,r4,r5,r6,r7,r8,r9,LOSS,r11,r12,r13,r14,r15,r16,r17,r18,r19,r20,r21,r22,AVG,r24]" \
+                  --metric-transformations file:///tmp/packet_loss_metric_filter.json \
+                  --region ${AWS::Region}
+                
+                aws logs put-metric-filter --log-group-name $log_group_name \
+                  --filter-name "latency" \
+                  --filter-pattern "[r1,r2,r3,,r4,r5,r6,r7,r8,r9,LOSS,r11,r12,r13,r14,r15,r16,r17,r18,r19,r20,r21,r22,AVG,r24]" \
+                  --metric-transformations file:///tmp/latency_metric_filter.json \
+                  --region ${AWS::Region}
+    CreationPolicy:
+      ResourceSignal:
+        Count: 1
+        Timeout: "PT15M"
+    Properties:
+      SubnetId: !Ref SubnetId
+      ImageId: !FindInMap ["ImageIds", !Ref "AWS::Region", "linux2"]
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref MonitoringIamInstanceProfile
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+      - DeviceName: "/dev/xvda"
+        Ebs:
+          VolumeType: "gp3"
+          DeleteOnTermination: "true"
+          VolumeSize: 20
+          Encrypted: true
+          KmsKeyId: !Ref EBSKMSKeyArn
+      UserData:
+        Fn::Base64: !Sub |
+          #!/usr/bin/env bash
+          yum update -y &> /dev/null
+          yum install -y python3 &> /dev/null
+          yum install -y amazon-cloudwatch-agent &> /dev/null
+
+          /opt/aws/bin/cfn-init -v --stack ${AWS::StackId} --resource TestInstance --region ${AWS::Region} --configsets default
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource TestInstance --region ${AWS::Region}
+      Tags:
+      - Key: Name
+        Value: !Sub ${AccountName}-${Project}-${Environment}-monit-instance
+      - Key: Project
+        Value: !Ref Project
+      - Key: Environment
+        Value: !Ref Environment
+
+  

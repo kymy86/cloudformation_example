@@ -1,0 +1,284 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: | 
+  This template creates an Application Load Balancer.
+  Requests are allowed just from CloudFront distribution prefix list.
+  
+Parameters:
+
+  AccountName:
+    Type: String
+  CertificateArn:
+    Type: String
+  CostCenter:
+    Type: String
+  Environment:
+    Type: String
+  Owner:
+    Type: String
+  Project:
+    Type: String
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+  SubnetId3:
+    Type: AWS::EC2::Subnet::Id
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+
+  PrefixListCloudFront:
+    Type: String
+    Description: connections allowed just from CloudFront Distribution
+    Default: pl-4fa04526
+  
+  TopicArn:
+    Type: String
+    Description: The ARN of the SNS topic where sending the alarms notification
+    Default: ""
+  
+  AccessLogBucket:
+    Type: String
+    Description: S3 bucket where storing the LB access logs
+
+Conditions:
+  HasAlertTopic: !Not [!Equals [!Ref TopicArn, '']]
+
+Resources:
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 300
+      HealthCheckPath: /
+      HealthCheckTimeoutSeconds: 60
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: 200-401
+      Name: !Sub ${Environment}-${Project}-tg
+      Port: 443
+      Protocol: HTTPS
+      Tags:
+        - Key: AccountName
+          Value: !Ref AccountName
+        - Key: CostCenter
+          Value: !Ref CostCenter
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub ${Environment}-${Project}-tg
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60
+      TargetType: instance
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VpcId
+
+  SecurityGroupAlbPublic:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTPS access from CloudFront
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourcePrefixListId: !Ref PrefixListCloudFront
+      Tags:
+        - Key: AccountName
+          Value: !Ref AccountName
+        - Key: CostCenter
+          Value: !Ref CostCenter
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub ${Environment}-${Project}-alb-sg
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+      VpcId: !Ref VpcId
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: 60
+        - Key: access_logs.s3.enabled
+          Value: true
+        - Key: access_logs.s3.bucket
+          Value: !Ref AccessLogBucket
+        - Key: access_logs.s3.prefix
+          Value: !Ref AWS::StackName
+      Name: !Sub ${Environment}-${Project}-alb
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref SecurityGroupAlbPublic
+      Subnets:
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+        - !Ref SubnetId3
+      Tags:
+        - Key: AccountName
+          Value: !Ref AccountName
+        - Key: CostCenter
+          Value: !Ref CostCenter
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Name
+          Value: !Sub ${Environment}-${Project}-alb
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+  
+  ListenerHttp:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Host: '#{host}'
+            Path: /#{path}
+            Port: 443
+            Protocol: HTTPS
+            Query: '#{query}'
+            StatusCode: HTTP_301
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+  
+  ListenerHttps:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS-1-2-2017-01  
+
+  ## Alarms
+
+  BackendConnectionErrorsTooHighAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: !Sub '${Project}-${Environment}: Elastic load balancer backend connection errors'
+      Namespace: 'AWS/ELB'
+      MetricName: BackendConnectionErrors
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      AlarmActions:
+      - !Ref TopicArn
+      Dimensions:
+      - Name: LoadBalancerName
+        Value: !Ref LoadBalancer
+  
+  HTTPCodeELB5XXTooHighAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: !Sub '${Project}-${Environment}: Elastic load balancer returns 5XX HTTP status codes'
+      Namespace: 'AWS/ELB'
+      MetricName: HTTPCode_ELB_5XX
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      AlarmActions:
+      - !Ref TopicArn
+      Dimensions:
+      - Name: LoadBalancerName
+        Value: !Ref LoadBalancer
+
+  HTTPCodeTarget5XXTooHighAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: !Sub '${Project}-${Environment}: Elastic load balancer receives 5XX HTTP status codes from backends'
+      Namespace: 'AWS/ELB'
+      MetricName: HTTPCode_Backend_5XX
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      AlarmActions:
+      - !Ref TopicArn
+      Dimensions:
+      - Name: LoadBalancerName
+        Value: !Ref LoadBalancer
+
+  SpilloverCountTooHighAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: !Sub '${Project}-${Environment}: Elastic load balancer rejected requests because the surge queue is full.'
+      Namespace: 'AWS/ELB'
+      MetricName: SpilloverCount
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      AlarmActions:
+      - !Ref TopicArn
+      Dimensions:
+      - Name: LoadBalancerName
+        Value: !Ref LoadBalancer
+
+  SurgeQueueLengthTooHighAlarm:
+    Condition: HasAlertTopic
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      AlarmDescription: !Sub '${Project}-${Environment}: Elastic load balancer surge queue is queuing up. Requests will be dropped when more than 1024 requests are queued.'
+      Namespace: 'AWS/ELB'
+      MetricName: SurgeQueueLength
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 512
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      AlarmActions:
+      - !Ref TopicArn
+      Dimensions:
+      - Name: LoadBalancerName
+        Value: !Ref LoadBalancer
+  
+Outputs:
+
+  TargetGroupArn:
+    Description: Target Group Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-tg-arn
+    Value: !Ref TargetGroup
+
+  LoadBalancerArn:
+    Description: Load Balancer Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-alb-arn
+    Value: !Ref LoadBalancer
+  LoadBalancerCanonicalHostedZoneID:
+    Description: Load Balancer Canonical Hosted Zone ID
+    Export:
+      Name: !Sub ${AWS::StackName}-alb-canonical-hosted-zone-id
+    Value: !GetAtt LoadBalancer.CanonicalHostedZoneID
+  LoadBalancerDNSName:
+    Description: Load Balancer DNS Name
+    Export:
+      Name: !Sub ${AWS::StackName}-alb-dns-name
+    Value: !GetAtt LoadBalancer.DNSName

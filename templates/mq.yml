@@ -1,0 +1,143 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template creates an Amazon MQ broker
+Parameters:
+
+  Environment:
+    Type: String
+
+  Project:
+    Type: String
+  
+  DeploymentMode:
+    Type: String
+    Description: Type of cluster to deploy
+    AllowedValues:
+    - SINGLE_INSTANCE
+    - ACTIVE_STANDBY_MULTI_AZ
+    - CLUSTER_MULTI_AZ
+  
+  KMSKeyID:
+    Type: String
+    Description: The KMS key used to encrypt cluster
+    Default: ""
+  
+  EngineVersion:
+    Type: String
+    Description: MQ Engine version
+    Default: "5.16.3"
+  
+  InstanceType:
+    Description: Broker EC2 instance type
+    Type: String
+    Default: mq.t3.micro
+  
+  StorageType:
+    Description: Broker storage type
+    Type: String
+    AllowedValues:
+    - efs
+    - ebs
+    Default: "efs"
+  
+  VPC: 
+    Description: Select VPC
+    Type: "AWS::EC2::VPC::Id"
+  
+  VPCCidr:
+    Type: String
+    Description: VPC CIDR
+  
+  SubnetIDs: 
+    Description: 2 Subnet IDs (comma separated)
+    Type: "List<AWS::EC2::Subnet::Id>"
+  
+  Username:
+    Type: String
+    NoEcho: True
+    Default: brokeradmin
+  
+  Password:
+    Type:  AWS::SSM::Parameter::Value<String>
+    Description: The name of the parameter store where the password is saved
+    NoEcho: true
+  
+Conditions:
+
+  IsMultiAZ: !Not [ !Equals [!Ref DeploymentMode, SINGLE_INSTANCE]]
+
+Resources:
+
+  BrokerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub Allow traffic for ${Project}-${Environment}-mq
+      VpcId: !Ref VPC
+      GroupName: !Sub ${Project}-${Environment}-mq-sg
+      SecurityGroupIngress:
+      - IpProtocol: TCP
+        ToPort: 5671
+        FromPort: 5671
+        CidrIp: !Ref VPCCidr
+      - IpProtocol: TCP
+        ToPort: 8883
+        FromPort: 8883
+        CidrIp: !Ref VPCCidr
+      - IpProtocol: TCP
+        ToPort: 8162
+        FromPort: 8162
+        CidrIp: !Ref VPCCidr
+      - IpProtocol: TCP
+        ToPort: 61617
+        FromPort: 61617
+        CidrIp: !Ref VPCCidr
+      - IpProtocol: TCP
+        ToPort: 61614
+        FromPort: 61614
+        CidrIp: !Ref VPCCidr
+      - IpProtocol: TCP
+        ToPort: 61619
+        FromPort: 61619
+        CidrIp: !Ref VPCCidr
+      Tags:
+      - Key: Name
+        Value: !Sub ${Project}-${Environment}-sg
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project
+
+  Broker:
+    Type: AWS::AmazonMQ::Broker
+    Properties:
+      BrokerName: !Sub ${Project}-${Environment}-mq
+      AutoMinorVersionUpgrade: true
+      DeploymentMode: !Ref DeploymentMode
+      EncryptionOptions:
+        KmsKeyId: !Ref KMSKeyID
+        UseAwsOwnedKey: false
+      EngineType: ACTIVEMQ
+      EngineVersion: !Ref EngineVersion
+      HostInstanceType: !Ref InstanceType
+      StorageType: !Ref StorageType
+      Logs:
+        Audit: false
+        General: true
+      PubliclyAccessible: false
+      SecurityGroups:
+      - !Ref BrokerSecurityGroup
+      SubnetIds:
+      - !Select [0, !Ref SubnetIDs]
+      - !If
+        - IsMultiAZ
+        - !Select [1, !Ref SubnetIDs]
+        - !Ref AWS::NoValue
+      Users:
+      - ConsoleAccess: true
+        Username: !Ref Username
+        Password: !Ref Password
+      Tags:
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project

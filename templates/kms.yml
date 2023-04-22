@@ -1,0 +1,69 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template create a KMS key suitable for the Autoscaling-group service as well
+
+Parameters: 
+  KeyName: 
+    Type: String 
+  Environment:
+    Type: String
+
+Resources: 
+  Key: 
+    Type: 'AWS::KMS::Key' 
+    Properties: 
+      Description: Symmetric KMS key 
+      EnableKeyRotation: true 
+      PendingWindowInDays: 20 
+      KeyPolicy: 
+        Version: "2012-10-17" 
+        Id: key-default-1 
+        Statement: 
+          - Sid: Enable IAM User Permissions 
+            Effect: Allow 
+            Principal: 
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' 
+            Action: 'kms:*' 
+            Resource: '*' 
+          - Sid: Allow use of the key 
+            Effect: Allow 
+            Principal: 
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' 
+            Action: 
+              - 'kms:DescribeKey' 
+              - 'kms:Encrypt' 
+              - 'kms:Decrypt' 
+              - 'kms:ReEncrypt*' 
+              - 'kms:GenerateDataKey' 
+              - 'kms:GenerateDataKeyWithoutPlaintext' 
+            Resource: '*'
+          - Sid: Allow service-linked role use of the customer managed key
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            Action:
+            - kms:Encrypt
+            - kms:Decrypt
+            - kms:ReEncrypt*
+            - kms:GenerateDataKey*
+            - kms:DescribeKey
+            Resource: "*"
+          - Sid: Allow attachment of persistent resources
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            Action:
+            - kms:CreateGrant
+            Resource: "*"
+            Condition:
+              Bool:
+                "kms:GrantIsForAWSResource": "true"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  KeyAlias: 
+    Type: 'AWS::KMS::Alias' 
+    Properties: 
+      AliasName: !Sub 'alias/${KeyName}' 
+      TargetKeyId: !Ref Key 

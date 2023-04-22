@@ -1,0 +1,236 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFront distribution for a WordPress application
+
+Parameters:
+  Environment:
+    Type: String
+  Owner:
+    Type: String
+  Project:
+    Type: String
+  Application:
+    Type: String
+
+  CloudFrontAcmCertificate:
+    Type: String
+    Description: ACM certificate ARN
+  
+  LoadBalancerDNSName:
+    Type: String
+    Description: Load Balancer DNS Name
+  
+  Aliases:
+    Type: CommaDelimitedList
+    Description: List of cloudfront aliases
+
+
+Resources:
+
+  DefaultCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: !Sub Wordpress-${Application}-Custom-Cache-Policy
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: all
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+            - Host
+            - Origin
+            - Referer
+          QueryStringsConfig:
+            QueryStringBehavior: all
+  
+  CustomOriginPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub WordPress-${Application}-Custom-Headers-Passed
+        CookiesConfig:
+          CookieBehavior: whitelist
+          Cookies:
+          - cookiescomment_author_*
+          - comment_author_email_*
+          - comment_author_url_*
+          - wordpress_logged_in_*
+          - wordpress_test_cookie
+          - wp-settings-*
+          - PHPSESSID
+          - wordpress_*
+          - wordpress_sec_*
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+          - Host
+          - Origin
+          - Referer
+          - CloudFront-Is-Desktop-Viewer
+          - CloudFront-Is-Mobile-Viewer
+          - CloudFront-Is-Tablet-Viewer
+        QueryStringsConfig:
+          QueryStringBehavior: all
+  
+  NoCacheOriginPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub WordPress-${Application}-NoCache
+        Comment: Cache disabled
+        CookiesConfig:
+          CookieBehavior: all
+        HeadersConfig:
+          HeaderBehavior: allViewer
+        QueryStringsConfig:
+          QueryStringBehavior: all
+
+  CloudFrontDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        Aliases: !Ref Aliases
+        Comment: !Join [",", !Ref Aliases]
+        Origins:
+        - DomainName: !Ref LoadBalancerDNSName
+          Id: elb
+          CustomOriginConfig:
+            OriginProtocolPolicy: 'https-only'
+            OriginReadTimeout: 60
+        #Default
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref DefaultCachePolicy
+          OriginRequestPolicyId: !Ref CustomOriginPolicy
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        CacheBehaviors:
+        - PathPattern: /wp-login.php
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref DefaultCachePolicy
+          OriginRequestPolicyId: !Ref NoCacheOriginPolicy
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        - PathPattern: /wp-admin/*
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref DefaultCachePolicy
+          OriginRequestPolicyId: !Ref NoCacheOriginPolicy
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        - PathPattern: /wp-json/*
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref DefaultCachePolicy
+          OriginRequestPolicyId: !Ref NoCacheOriginPolicy
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        - PathPattern: /wp-cron.php
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref DefaultCachePolicy
+          OriginRequestPolicyId: !Ref NoCacheOriginPolicy
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        - PathPattern: /xmlrpc.php
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref DefaultCachePolicy
+          OriginRequestPolicyId: !Ref NoCacheOriginPolicy
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        - PathPattern: /wp-trackback.php
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref DefaultCachePolicy
+          OriginRequestPolicyId: !Ref NoCacheOriginPolicy
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        - PathPattern: /contacts
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref DefaultCachePolicy
+          OriginRequestPolicyId: !Ref NoCacheOriginPolicy
+          TargetOriginId: elb
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: 'PriceClass_All'
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CloudFrontAcmCertificate
+          SslSupportMethod: 'sni-only'
+          MinimumProtocolVersion: TLSv1.2_2018
+      Tags:
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Name
+        Value: !Sub ${Environment}-${Project}-cloudfront
+      - Key: Owner
+        Value: !Ref Owner
+      - Key: Application
+        Value: !Ref Project

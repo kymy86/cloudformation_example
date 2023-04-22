@@ -1,0 +1,276 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: This template creates a redshift cluster
+
+Parameters:
+  Environment:
+    Type: String
+
+  Project:
+    Type: String
+
+  DatabaseName:
+    Description: The name of the first database to be created when the cluster is
+      created
+    Type: String
+    AllowedPattern: "([a-z]|[0-9])+"
+
+  ClusterType:
+    Description: The type of cluster
+    Type: String
+    Default: single-node
+    AllowedValues:
+    - single-node
+    - multi-node
+
+  NumberOfNodes:
+    Description: The number of compute nodes in the cluster. For multi-node clusters,
+      the NumberOfNodes parameter must be greater than 1
+    Type: Number
+    Default: '1'
+
+  NodeType:
+    Description: The type of node to be provisioned
+    Type: String
+    AllowedValues:
+    - ds2.xlarge
+    - ds2.8xlarge
+    - dc1.large
+    - dc1.8xlarge
+
+  MasterUsername:
+    Description: The user name that is associated with the master user account for
+      the cluster that is being created
+    Type: String
+    AllowedPattern: "([a-z])([a-z]|[0-9])*"
+
+  MasterUserPassword:
+    Description: The password that is associated with the master user account for
+      the cluster that is being created.
+    Type: AWS::SSM::Parameter::Value<String>
+    NoEcho: 'true'
+
+  PortNumber:
+    Description: The port number on which the cluster accepts incoming connections.
+    Type: Number
+
+  SubnetIDs: 
+    Description: Subnet ID
+    Type: "List<AWS::EC2::Subnet::Id>"
+  
+  VpcID:
+    Description: VpcID
+    Type: AWS::EC2::VPC::Id
+  
+  VpcCIDR:
+    Description: VPC CIDR
+    Type: String
+
+  KMSKeyID:
+    Type: String
+    Description: The KMS key used to encrypt cluster
+  
+  KmsArn:
+    Type: String
+    Description: ARN for of the KMS key
+  
+  HostedZoneID:
+    Type: String
+    Description: HostedZoneID
+    Default: ""
+  
+  DNSName:
+    Type: String
+    Description: Route53 DNS name
+    Default: ""
+  
+  RecordType:
+    Type: String
+    Description: Route53 record type
+    Default: "A"
+
+Conditions:
+
+  IsMultiNodeCluster:
+    Fn::Equals:
+    - Ref: ClusterType
+    - multi-node
+  
+  IsRoute53: !Not [!Equals [!Ref HostedZoneID, ""]]
+
+Resources:
+
+  RedshiftLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: "Private"
+      BucketName: !Sub ${Project}-${Environment}-${DatabaseName}-redshift-logs
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - ServerSideEncryptionByDefault:
+            KMSMasterKeyID: !Ref KmsArn
+            SSEAlgorithm: 'aws:kms'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: True
+        BlockPublicPolicy: True
+        IgnorePublicAcls: True
+        RestrictPublicBuckets: True
+      Tags:
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project
+  
+  BucketPolicyDenyHTTP:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref RedshiftLogBucket
+      PolicyDocument:
+        Statement:
+        - Action: 's3:*'
+          Effect: Deny
+          Principal: '*'
+          Resource:
+          - !Sub arn:${AWS::Partition}:s3:::${RedshiftLogBucket}/*
+          - !Sub arn:${AWS::Partition}:s3:::${RedshiftLogBucket}
+          Condition:
+            Bool:
+              'aws:SecureTransport': false
+  
+  RedshiftRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - redshift.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: redshift-policy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:List*
+            - s3:Get*
+            - s3:PutObject
+            - s3:PutObjectAcl
+            - s3:PutObjectTagging
+            - s3:DeleteObjectVersion
+            Resource:
+            - !Sub arn:${AWS::Partition}:s3:::${RedshiftLogBucket}/*
+            - !Sub arn:${AWS::Partition}:s3:::${RedshiftLogBucket}
+          - Effect: Allow
+            Action:
+            - 'kms:DescribeKey' 
+            - 'kms:Encrypt' 
+            - 'kms:Decrypt' 
+            - 'kms:ReEncrypt*' 
+            - 'kms:GenerateDataKey' 
+            - 'kms:GenerateDataKeyWithoutPlaintext'
+            Resource:
+            - !Ref KmsArn
+
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    UpdateReplacePolicy: Retain
+    DeletionPolicy: Retain
+    Properties:
+      ClusterType: !Ref ClusterType
+      NumberOfNodes:
+        Fn::If:
+        - IsMultiNodeCluster
+        - Ref: NumberOfNodes
+        - Ref: AWS::NoValue
+      NodeType: !Ref NodeType
+      DBName: !Ref DatabaseName
+      MasterUsername: !Ref MasterUsername
+      MasterUserPassword: !Ref MasterUserPassword
+      ClusterParameterGroupName: !Ref RedshiftClusterParameterGroup
+      VpcSecurityGroupIds:
+      - Ref: RedshiftSecurityGroup
+      ClusterSubnetGroupName: !Ref RedshiftClusterSubnetGroup
+      PubliclyAccessible: false
+      Port: !Ref PortNumber
+      KmsKeyId: !Ref KMSKeyID
+      PreferredMaintenanceWindow: Sun:21:15-Sun:21:45
+      Encrypted: true
+      LoggingProperties:
+        BucketName: !Ref RedshiftLogBucket
+      IamRoles:
+      - !GetAtt RedshiftRole.Arn
+      Tags:
+      - Key: Name
+        Value: !Sub ${Project}-${Environment}-${DatabaseName}
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project
+  
+  RedshiftClusterParameterGroup:
+    Type: AWS::Redshift::ClusterParameterGroup
+    Properties:
+      Description: Cluster parameter group
+      ParameterGroupFamily: redshift-1.0
+      Parameters:
+      - ParameterName: enable_user_activity_logging
+        ParameterValue: 'true'
+
+  RedshiftClusterSubnetGroup:
+    Type: AWS::Redshift::ClusterSubnetGroup
+    Properties:
+      Description: Cluster subnet group
+      SubnetIds:
+        - !Select [0, !Ref SubnetIDs]
+        - !Select [1, !Ref SubnetIDs]
+
+  RedshiftSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Initial VPC Enabled
+      VpcId: !Ref VpcID
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: !Ref PortNumber
+        ToPort: !Ref PortNumber
+        CidrIp: !Ref VpcCIDR
+      Tags:
+      - Key: Name
+        Value: !Sub ${Project}-${Environment}-${DatabaseName}-sg
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project
+  
+  RecordSet:
+    Type: AWS::Route53::RecordSet
+    Condition: IsRoute53
+    Properties:
+      HostedZoneId: !Ref HostedZoneID
+      Name: !Ref DNSName
+      Type: !Ref RecordType
+      TTL: 60
+      ResourceRecords:
+      - !GetAtt RedshiftCluster.Endpoint.Address
+
+Outputs:
+  ClusterEndpoint:
+    Description: Cluster endpoint
+    Value: !Sub "${RedshiftCluster.Endpoint.Address}:${RedshiftCluster.Endpoint.Port}"
+  ClusterName:
+    Description: Name of cluster
+    Value:
+      Ref: RedshiftCluster
+  ParameterGroupName:
+    Description: Name of parameter group
+    Value:
+      Ref: RedshiftClusterParameterGroup
+  RedshiftClusterSubnetGroupName:
+    Description: Name of cluster subnet group
+    Value:
+      Ref: RedshiftClusterSubnetGroup

@@ -1,0 +1,515 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  This self contained template creates a working Locust ECS cluster
+
+Parameters:
+
+  Constructor:
+    Type: String
+    Description: A prefix to tag the generated resources
+    
+  Environment:
+    Type: String
+    Description: Environment where the resources will be provisioned
+    AllowedValues:
+    - dev
+    - pro
+    - int
+
+  Application:
+    Type: String
+    Description: The Project name
+    Default: locust
+  
+  LBApplicationSubnets:
+    Type: CommaDelimitedList
+    Description: The list of public SubnetIds in your Virtual Private Cloud (VPC) for application
+    ConstraintDescription: >-
+      must be a list of two existing public subnets associated with two different
+      availability zones. They should be residing in the selected Virtual Private
+      Cloud.
+  
+  ClusterApplicationSubnets:
+    Type: CommaDelimitedList
+    Description: The list of private SubnetIds in your Virtual Private Cloud (VPC) for application
+    ConstraintDescription: >-
+      must be a list of two existing private subnets associated with two different
+      availability zones. They should be residing in the selected Virtual Private
+      Cloud.
+  
+  VPCId:
+    Type: AWS::EC2::VPC::Id
+    Description: The ID of VPC where the resources will be provisioned
+  
+  LocustConfigBucket:
+    Type: String
+    Description: S3 bucket where the Locust python config files are stored
+    Default: pro-locust-config
+  
+  LocustMasterServiceName:
+    Type: String
+    Description: The Service name for locust master node
+    Default: locust-master
+
+  LocustSlaveServiceName:
+    Type: String
+    Description: The service name for locust slave node
+    Default: locust-slave
+  
+  SlaveCount:
+    Type: Number
+    Description: The number of slave nodes to provision
+    Default: 1
+
+Resources:
+
+################################### ECS Cluster ###############################################################
+
+  # This is an IAM role which authorizes ECS to manage resources on your
+  # account on your behalf
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              # Rules which allow ECS to attach network interfaces to instances
+              # on your behalf in order for awsvpc networking mode to work right
+              - 'ec2:AttachNetworkInterface'
+              - 'ec2:CreateNetworkInterface'
+              - 'ec2:CreateNetworkInterfacePermission'
+              - 'ec2:DeleteNetworkInterface'
+              - 'ec2:DeleteNetworkInterfacePermission'
+              - 'ec2:Describe*'
+              - 'ec2:DetachNetworkInterface'
+              # Rules which allow ECS to update load balancers on your behalf
+              # with the informations about how to send traffic to your containers
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+            Resource: '*'
+    
+  # This is a role which is used by the ECS tasks themselves.
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: !Sub ${Constructor}-${Environment}-${Application}-ECSTaskExecutionRole
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Allow the ECS Tasks to download images from ECR
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+                # Allow the ECS tasks to upload logs to CloudWatch
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+              Resource: '*'
+  
+  #Task Role with particular permissions.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'ecs-tasks.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: access-config-s3-bucket
+        PolicyDocument:
+          Statement:
+          - Sid: S3Access
+            Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:GetObjectAcl
+            Resource:
+            - !Sub "arn:${AWS::Partition}:s3:::${LocustConfigBucket}/*"
+          - Action:
+            - s3:ListBucket
+            - s3:GetBucketAcl
+            - s3:GetBucketLocation
+            Effect: Allow
+            Resource:
+            - !Sub "arn:${AWS::Partition}:s3:::${LocustConfigBucket}"
+  
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${Constructor}-${Environment}-${Application}"
+      Tags:
+      - Key: Name
+        Value: !Sub "${Constructor}-${Environment}-${Application}"
+      - Key: Application
+        Value: !Ref Application
+  
+  TaskDefinitionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB security group
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+      - Description: Allow access from load balancer sg
+        IpProtocol: "-1"
+        SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Tags:
+        - Key: Application
+          Value: !Ref Application
+  
+  #This is for avoiding circular dependency
+  EcsSecurityGroupIngressFromSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Ingress from other containers in the same security group
+      GroupId: !Ref TaskDefinitionSecurityGroup
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref TaskDefinitionSecurityGroup
+  
+
+########################################### Load Balancer Resource ###############################################################
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB security group
+      VpcId: !Ref VPCId
+      SecurityGroupIngress:
+      - Description: Allow access from ALB to the Locust cluster
+        FromPort: 80
+        ToPort: 80
+        IpProtocol: tcp
+        CidrIp: "0.0.0.0/0"
+      Tags:
+        - Key: Application
+          Value: !Ref Application
+  
+  #Internal Application Load Balancer as entry point for the Locust cluster
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${Constructor}-${Environment}-${Application}-alb"
+      SecurityGroups:
+      -  !Ref AlbSecurityGroup
+      Subnets:
+      - !Select [0, !Ref LBApplicationSubnets]
+      - !Select [1, !Ref LBApplicationSubnets]
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: "180"
+      Tags:
+      - Key: Name
+        Value: !Sub "${Constructor}-${Environment}-${Application}-alb"
+      - Key: Application
+        Value: !Ref Application
+
+########################################### ECS Locust Master Service Resource ###############################################################
+
+#The Service Discovery settings
+
+  # This is the Service Discovery Namespace that is the
+  # domain name you want to route the traffic to
+  Namespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Description: !Sub "The ${AWS::StackName} Service Discovery namespace"
+      Vpc: !Ref VPCId
+      Name: !Sub "${Constructor}.${Environment}.${Application}.local"
+      Tags:
+      - Key: Application
+        Value: !Ref Application
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Name
+        Value: !Sub "${Constructor}-${Environment}-${Application}-namespace"
+
+  ServiceDiscovery:
+    Type: 'AWS::ServiceDiscovery::Service'
+    Properties:
+      Description: !Sub "Service discovery settings for ${AWS::StackName}"
+      DnsConfig:
+        DnsRecords:
+        - Type: A
+          TTL: 30
+        - Type: SRV
+          TTL: 30
+        NamespaceId: !GetAtt Namespace.Id
+        RoutingPolicy: MULTIVALUE
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      Name: !Ref LocustMasterServiceName
+      NamespaceId: !GetAtt Namespace.Id
+      Tags:
+        - Key: Application
+          Value: !Ref Application
+  
+  #Service Log Group
+  LogGroup:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: 'AWS::Logs::LogGroup'
+
+  # Create a HTTP listener on the load balancer for routing traffic to the target group
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          Type: forward
+  
+  #Service TargetGroup
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: ApplicationLoadBalancer
+    Properties:
+      # The full name can only be of 32 characters
+      Name: !Sub "${Constructor}-${Environment}"
+      HealthCheckIntervalSeconds: 30
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: "/"
+      Matcher:
+        HttpCode: '200-399' #already the default value for a NLB
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: "60"
+      Port: 8089
+      Protocol: HTTP
+      TargetType: ip
+      VpcId: !Ref VPCId
+      Tags:
+      - Key: Name
+        Value: !Sub "${Constructor}-${Environment}-tg"
+      - Key: Application
+        Value: !Ref Application
+  
+  MasterTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref AWS::StackName
+      Cpu: "2048"
+      Memory: "4096"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+      - FARGATE
+      Volumes:
+      - Name: locust-conf-vol
+        Host: {}
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+
+      - Name: !Ref LocustMasterServiceName
+        Image: locustio/locust
+        PortMappings:
+          - ContainerPort: 8089
+            Protocol: tcp
+        Essential: true
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            'awslogs-region': !Ref 'AWS::Region'
+            'awslogs-group': !Ref LogGroup
+            'awslogs-stream-prefix': !Ref LocustMasterServiceName
+        MountPoints:
+        - ContainerPath: /mnt/locust
+          SourceVolume: locust-conf-vol
+        Command:
+        - -f
+        - /mnt/locust/locustfile.py
+        - --master
+        DependsOn:
+        - Condition: COMPLETE
+          ContainerName: locust-config
+      #Locust config container
+      - Name: locust-config
+        Image: public.ecr.aws/aws-cli/aws-cli:2.9.8
+        Essential: false
+        Command:
+        - s3
+        - cp
+        - --recursive
+        - !Sub s3://${LocustConfigBucket}
+        - /mnt/locust
+        MountPoints:
+        - ContainerPath: /mnt/locust
+          SourceVolume: locust-conf-vol
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            'awslogs-region': !Ref 'AWS::Region'
+            'awslogs-group': !Ref LogGroup
+            'awslogs-stream-prefix': locust-config
+      Tags:
+      - Key: Name
+        Value: !Sub "${Constructor}-${Environment}-${Application}-td-${LocustMasterServiceName}"
+      - Key: Application
+        Value: !Ref Application
+  
+  MasterService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ApplicationLoadBalancer
+      - LoadBalancerListener
+    Properties:
+      ServiceName: !Ref LocustMasterServiceName
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+          - !Ref TaskDefinitionSecurityGroup
+          Subnets:
+          - !Select [0, !Ref ClusterApplicationSubnets]
+          - !Select [1, !Ref ClusterApplicationSubnets]
+      TaskDefinition: !Ref MasterTaskDefinition
+      ServiceRegistries:
+      - ContainerName: !Ref LocustMasterServiceName
+        ContainerPort: 8089
+        RegistryArn: !GetAtt ServiceDiscovery.Arn
+      LoadBalancers:
+      - ContainerName: !Ref LocustMasterServiceName
+        ContainerPort: 8089
+        TargetGroupArn: !Ref TargetGroup
+      Tags:
+        - Key: Application
+          Value: !Ref Application
+
+########################################### ECS Locust Slave Service Resource ###############################################################
+
+  SlaveTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref AWS::StackName
+      Cpu: "2048"
+      Memory: "4096"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+      - FARGATE
+      Volumes:
+      - Name: locust-conf-vol
+        Host: {}
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+
+      - Name: !Ref LocustSlaveServiceName
+        Image: locustio/locust
+        Essential: true
+        Ulimits:
+        - HardLimit: 10000
+          Name: nofile
+          SoftLimit: 10000
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            'awslogs-region': !Ref 'AWS::Region'
+            'awslogs-group': !Ref LogGroup
+            'awslogs-stream-prefix': !Ref LocustSlaveServiceName
+        MountPoints:
+        - ContainerPath: /mnt/locust
+          SourceVolume: locust-conf-vol
+        Command:
+        - -f
+        - /mnt/locust/locustfile.py
+        - --worker
+        - --master-host
+        - !Sub ${LocustMasterServiceName}.${Constructor}.${Environment}.${Application}.local
+        DependsOn:
+          - Condition: COMPLETE
+            ContainerName: locust-config
+      #Locust config container
+      - Name: locust-config
+        Image: public.ecr.aws/aws-cli/aws-cli:2.9.8
+        Essential: false
+        Command:
+        - s3
+        - cp
+        - --recursive
+        - !Sub s3://${LocustConfigBucket}
+        - /mnt/locust
+        MountPoints:
+        - ContainerPath: /mnt/locust
+          SourceVolume: locust-conf-vol
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            'awslogs-region': !Ref 'AWS::Region'
+            'awslogs-group': !Ref LogGroup
+            'awslogs-stream-prefix': locust-config
+      Tags:
+      - Key: Name
+        Value: !Sub "${Constructor}-${Environment}-${Application}-td-${LocustSlaveServiceName}"
+      - Key: Application
+        Value: !Ref Application
+
+  SlaveService:
+    Type: AWS::ECS::Service
+    DependsOn: MasterService
+    Properties:
+      ServiceName: !Ref LocustSlaveServiceName
+      Cluster: !Ref ECSCluster
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: !Ref SlaveCount
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+          - !Ref TaskDefinitionSecurityGroup
+          Subnets:
+          - !Select [0, !Ref ClusterApplicationSubnets]
+          - !Select [1, !Ref ClusterApplicationSubnets]
+      TaskDefinition: !Ref SlaveTaskDefinition
+      Tags:
+        - Key: Application
+          Value: !Ref Application
+
+Outputs:
+
+  MasterEndpoint:
+    Description: The Endpoint used to reach the locust master node
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"
+  
+  DNSEndpoint:
+    Description: The Endpoint used to reach the locust master node
+    Value: !Sub ${ApplicationLoadBalancer.DNSName}
+    Export:
+      Name: !Sub ${AWS::StackName}-DNSName

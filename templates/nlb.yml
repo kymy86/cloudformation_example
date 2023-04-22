@@ -1,0 +1,102 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >- 
+  Deploy an internal Network Load Balancer
+
+Parameters:
+
+  #Tags and general properties
+  
+  Environment:
+    Type: String
+    Description: Environment where the resources will be provisioned
+    AllowedValues:
+    - dev
+    - pro
+    - int
+
+  Application:
+    Type: String
+    Description: The Project name
+  
+  Project:
+    Type: String
+    Description: The project name
+
+
+  ApplicationSubnets:
+    Type: CommaDelimitedList
+    Description: The list of private SubnetIds in your Virtual Private Cloud (VPC) for application
+    ConstraintDescription: >-
+      must be a list of two existing private subnets associated with two different
+      availability zones. They should be residing in the selected Virtual Private
+      Cloud.
+
+  #Condition options
+  EnableLogs:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+    - 'true'
+    - 'false'
+
+  #properties related with the condition options
+  S3LogsBucket:
+    Type: String
+    Description: S3 bucket name where to store the load balancer access logs
+    Default: ''
+
+Conditions:
+  CreateLogs: !Equals [!Ref EnableLogs, 'true']
+
+Resources:
+
+  #Internal Network Load Balancer as entry point for the API Center services
+  NetworkLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${Project}-${Environment}-${Application}-nlb"
+      Scheme: internal
+      Type: network
+      Subnets:
+      - !Select [0, !Ref ApplicationSubnets]
+      - !Select [1, !Ref ApplicationSubnets]
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: "true"
+        - !If
+          - CreateLogs
+          - Key : access_logs.s3.enabled
+            Value: !Ref EnableLogs
+          - !Ref AWS::NoValue
+        - !If
+          - CreateLogs
+          - Key: access_logs.s3.bucket
+            Value: !Ref S3LogsBucket
+          - !Ref AWS::NoValue
+        - !If
+          - CreateLogs
+          - Key: access_logs.s3.prefix
+            Value: "ELBLogs"
+          - !Ref AWS::NoValue
+      Tags:
+      - Key: Project
+        Value: !Ref Project
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Name
+        Value: !Sub "${Project}-${Environment}-${Application}-nlb"
+  
+Outputs:
+
+  NLBEndpoint:
+    Description: The URI of the internal load balancer
+    Value: !GetAtt NetworkLoadBalancer.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-NLBEndpoint"
+
+  NLBArn:
+    Description: The ARN of the Network Load Balancer
+    Value: !Ref NetworkLoadBalancer
+    Export:
+      Name: !Sub "${AWS::StackName}-NLBArn"

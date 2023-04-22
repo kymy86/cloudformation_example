@@ -1,0 +1,301 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: | 
+  This template creates an APIGateway where requests are proxied to a Network Load Balancer.
+  NLB resource is imported from an external CloudFormation stack.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Description: Environment where the resources will be provisioned
+    AllowedValues:
+    - dev
+    - pro
+    - int
+
+  Application:
+    Type: String
+    Description: The Project name
+
+  NetworkLoadBalancerStackName:
+    Type: String
+    Description: Stack Name for the NLB
+
+  EndpointsStackName:
+    Type: String
+    Description: Stack Name for the VPC Endpoint
+
+  BurstLimit:
+    Type: Number
+    Description: The API Gateway burst limit (rps)
+    Default: 5000
+
+  RateLimit:
+    Type: Number
+    Description: The API Gateway rate limit (rps)
+    Default: 10000
+
+  ApiKeyValue:
+    Type: String
+    Description: The API Gateway key value
+    MinLength: 64
+
+  SNSTopicArn:
+    Type: String
+    Description: SNS Topic ARN Where the alarms notifications are sent
+    Default: ''
+
+  Project:
+    Type: String
+    Description: The tag about which project the stack is about
+
+  ApiStageLogsRetentionInDays:
+    Description: 'Specifies the number of days you want to retain log events in the specified log group.'
+    Type: Number
+    Default: 14
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+Conditions:
+
+  HasAlertTopic: !Not [!Equals [!Ref SNSTopicArn, '']]
+  IsProd: !Equals [!Ref Environment, "pro"]
+
+Resources:
+
+  #VPC Link for the Network Load Balancer
+  RESTVPCLink:
+    Type: AWS::ApiGateway::VpcLink
+    Properties:
+      Description: REST VPC Link for API Gateway integration with internal NLB
+      Name: !Sub ${Project}-${Environment}-${Application}-VPCLink
+      TargetArns:
+      - Fn::ImportValue: !Sub "${NetworkLoadBalancerStackName}-NLBArn"
+
+  #API Gateway settings
+  RestAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${Project}-${Environment}-${Application}-api-gw
+      Description: !Sub Main Entry point for the API Center project for ${Application} app
+      ApiKeySourceType: HEADER
+      EndpointConfiguration:
+        Types:
+          - PRIVATE
+        VpcEndpointIds:
+          - Fn::ImportValue: !Sub ${EndpointsStackName}-ApiGatewayInterfaceEndpointID
+      Policy:
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action:
+            - "execute-api:Invoke"
+            Resource:
+            - "execute-api:/*/*/*"
+          - Effect: Deny
+            Principal:
+              AWS: "*"
+            Action:
+            - "execute-api:Invoke"
+            Resource:
+            - "execute-api:/*/*/*"
+            Condition:
+              StringNotEquals:
+                "aws:SourceVpce":
+                  Fn::ImportValue: !Sub ${EndpointsStackName}-ApiGatewayInterfaceEndpointID
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: !Ref Application
+
+  MainResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt
+        - RestAPI
+        - RootResourceId
+      PathPart: '{proxy+}'
+      RestApiId: !Ref RestAPI
+
+  Method:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      HttpMethod: ANY
+      ApiKeyRequired: true
+      RequestParameters:
+        method.request.path.proxy: true
+      ResourceId: !Ref MainResource
+      RestApiId: !Ref RestAPI
+      AuthorizationType: NONE
+      Integration:
+        ConnectionId: !Ref RESTVPCLink
+        ConnectionType: VPC_LINK
+        IntegrationHttpMethod: ANY
+        RequestParameters:
+          integration.request.path.proxy: method.request.path.proxy
+        Type: HTTP_PROXY
+        Uri: !Join
+          - ""
+          - - "http://"
+            - Fn::ImportValue: !Sub "${NetworkLoadBalancerStackName}-NLBEndpoint"
+            - "/{proxy}"
+
+  Deployment:
+    DependsOn: Method
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref RestAPI
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      StageName: api
+      RestApiId: !Ref RestAPI
+      DeploymentId: !Ref Deployment
+      Description: !Sub ${Application} root stage
+      MethodSettings:
+        - !If
+          - IsProd
+          - ResourcePath: '/*'
+            HttpMethod: '*'
+            MetricsEnabled: true
+            DataTraceEnabled: true
+          - !Ref AWS::NoValue
+      AccessLogSetting:
+        DestinationArn: !If
+        - IsProd
+        - !GetAtt ApiStageLogGroup.Arn
+        - !Ref AWS::NoValue
+        Format: !If
+        - IsProd
+        - $context.identity.sourceIp - - [$context.requestTime] "$context.httpMethod $context.routeKey $context.protocol" $context.status $context.responseLength $context.requestId - - $context.domainName $context.apiId - - Error [$context.error.message] [$context.error.validationErrorString]
+        - !Ref AWS::NoValue
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: !Ref Application
+
+  ApiStageLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: IsProd
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${Environment}-${Application}
+      RetentionInDays: !Ref ApiStageLogsRetentionInDays
+
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    DependsOn:
+    - Deployment
+    - ApiStage
+    Properties:
+      Enabled: true
+      Name: !Sub ${Application}-api-key
+      StageKeys:
+      - RestApiId: !Ref RestAPI
+        StageName: api
+      Value: !Ref ApiKeyValue
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: !Ref Application
+
+  ApiUsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    Properties:
+      ApiStages:
+      - ApiId: !Ref RestAPI
+        Stage: !Ref ApiStage
+      UsagePlanName: !Sub ${Application}-usage-plan
+      Throttle:
+        BurstLimit: !Ref BurstLimit
+        RateLimit: !Ref RateLimit
+      Tags:
+        - Key: Project
+          Value: !Ref Project
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: !Ref Application
+
+  ApiUsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref ApiUsagePlan
+
+  ############################################# API Gateway alarms ####################################################
+
+  500ErrorsEventsAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: If there are 5xx errors on API, report it!
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+      - Name: ApiName
+        Value: !Sub ${Environment}-${Application}-api-gateway
+      - Name: Stage
+        Value: api
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+      - !Ref SNSTopicArn
+      OKActions:
+      - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+  LatencyEventsAlarm:
+    Condition: HasAlertTopic
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: If there are 5xx errors on API, report it!
+      Namespace: AWS/ApiGateway
+      MetricName: Latency
+      Dimensions:
+      - Name: ApiName
+        Value: !Sub ${Environment}-${Application}-api-gateway
+      - Name: Stage
+        Value: api
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 5
+      Threshold: 2000 #2seconds
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+      - !Ref SNSTopicArn
+      OKActions:
+      - !Ref SNSTopicArn
+      TreatMissingData: notBreaching
+
+Outputs:
+  InvokeURL:
+    Value: !Sub https://${RestAPI}.execute-api.${AWS::Region}.amazonaws.com/api/{proxy+}
+    Description: API Gateway endpoint
+
+  FullInvokeURL:
+    Description: URL to invoke the private API Gateway
+    Value: !Join
+      - ""
+      - - https://
+        - !Sub ${RestAPI}-
+        - Fn::ImportValue: !Sub ${EndpointsStackName}-ApiGatewayInterfaceEndpointID
+        - !Sub .execute-api.${AWS::Region}.amazonaws.com/api/{proxy+}
+    Export:
+      Name: !Sub ${AWS::StackName}-FullInvokeUrl

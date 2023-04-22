@@ -1,0 +1,107 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: This template creates an Elasticache Redis cluste
+
+Parameters:
+
+  Environment:
+    Type: String
+
+  Project:
+    Type: String
+  
+  NodeType:
+    Type: String
+    Default: cache.t4g.small
+  
+  NumNodes:
+    Type: String
+    Default: "1"
+  
+  RetentionLimit:
+    Type: String
+    Default: "1"
+  
+  VPCCidr:
+    Type: String
+    Description: VPC CIDR
+  
+  VPC:
+    Description: Select VPC
+    Type: "AWS::EC2::VPC::Id"
+  
+  SubnetIDs:
+    Description: Subnet ID
+    Type: "List<AWS::EC2::Subnet::Id>"
+  
+  MultiAZ:
+    Description: if cluster will be multi-az or not
+    Type: String
+    Default: false
+  
+  KMSKeyID:
+    Type: String
+    Description: The KMS key used to encrypt cluster
+  
+
+Resources:
+
+  CacheSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Initial VPC enabled
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: 6379
+          ToPort: 6379
+          CidrIp: !Ref VPCCidr
+
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      CacheSubnetGroupName: !Sub ${Project}-${Environment}-subnet-grp
+      Description: Subnet group
+      SubnetIds:
+      - !Select [0, !Ref SubnetIDs]
+      - !Select [1, !Ref SubnetIDs]
+      Tags:
+      - Key: Name
+        Value: !Sub ${Project}-${Environment}-subnet-group
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project
+
+  CacheCluster:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      AtRestEncryptionEnabled: true
+      CacheNodeType: !Ref NodeType
+      Engine: redis
+      Port: 6379
+      MultiAZEnabled: !Ref MultiAZ
+      AutomaticFailoverEnabled: !Ref MultiAZ
+      NumCacheClusters: !Ref NumNodes
+      SnapshotRetentionLimit: !Ref RetentionLimit
+      SnapshotWindow: 05:00-09:00
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      ReplicationGroupId: !Sub ${Project}-${Environment}-redis
+      ReplicationGroupDescription: !Sub ${Project}-${Environment}-redis
+      KmsKeyId: !Ref KMSKeyID
+      SecurityGroupIds:
+      - !Ref CacheSecurityGroup
+      Tags:
+      - Key: Name
+        Value: !Sub ${Project}-${Environment}-redis
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Project
+        Value: !Ref Project
+    
+    
+Outputs:
+
+  Endpoint:
+    Value: !Sub ${CacheCluster.PrimaryEndPoint.Address}:${CacheCluster.PrimaryEndPoint.Port}
+    Description: Redis cache endpoint

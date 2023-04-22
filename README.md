@@ -29,3 +29,7 @@ The main stack is the **app.yml**
 ## 5. s3bucket
 
 In this folder you can find a very simple cfn stack that creates a S3 bucket.
+
+# 6. templates
+
+In this folder you can find a mix of CloudFormation templates for provisining different kind of AWS resources.
