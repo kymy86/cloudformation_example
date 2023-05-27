@@ -1,0 +1,130 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  This template creates a bucket s3 and a cloudfront distribution that allows users to access the
+  data stored in the bucket from the web.
+
+Parameters:
+
+  Company:
+    Type: String
+    Description: Insert the company name
+
+  Project:
+    Type: String
+    Description: Insert the project name
+
+  Environment:
+    Type: String
+    Description: Insert the environment
+    Default: base
+  
+  BucketDomainName:
+    Type: String
+    Description: S3 Bucket Regional Domain Name
+  
+  WebACLId:
+    Type: String
+    Description: Web ACL ID
+
+Resources:
+
+  NoCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 0
+        MaxTTL: 0
+        MinTTL: 0
+        Name: !Sub ${Company}-${Project}-${Environment}-Disabled-Cache-Policy
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingGzip: false
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+  
+  NoCacheOriginPolicy:
+    Type: AWS::CloudFront::OriginRequestPolicy
+    Properties:
+      OriginRequestPolicyConfig:
+        Name: !Sub ${Company}-${Project}-${Environment}-NorOriginCache
+        Comment: Cache disabled
+        CookiesConfig:
+          CookieBehavior: all
+        HeadersConfig:
+          HeaderBehavior: whitelist
+          Headers:
+          - origin
+          - access-control-request-headers
+          - access-control-request-method
+        QueryStringsConfig:
+          QueryStringBehavior: all
+  
+  # CloudFront origin Access Control to expose S3 bucket through CloudFront
+  CloudFrontOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: !Sub Access to ${BucketDomainName}
+        Name: !Sub ${BucketDomainName}-origin-access-control
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+  
+  CloudFrontDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        Comment: "Distribution used to serve static contents"
+        WebACLId: !Ref WebACLId
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          CachePolicyId: !Ref NoCachePolicy
+          OriginRequestPolicyId: !Ref NoCacheOriginPolicy
+          TargetOriginId: s3origin
+          ViewerProtocolPolicy: 'redirect-to-https'
+          Compress: true
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        Origins:
+        - DomainName: 
+            Fn::ImportValue: !Sub "${BucketDomainName}"
+          Id: s3origin
+          OriginAccessControlId: !GetAtt CloudFrontOriginAccessControl.Id
+          S3OriginConfig:
+            OriginAccessIdentity: ""
+        PriceClass: PriceClass_100 #Just Europe and North America
+      Tags:
+      - Key: Environment
+        Value: !Ref Environment
+      - Key: Name
+        Value: !Sub ${Company}-${Project}-${Environment}-cloudfront
+      - Key: Company
+        Value: !Ref Company
+      - Key: Project
+        Value: !Ref Project
+
+Outputs:
+  
+  DistributionId:
+    Description: 'CloudFront distribution id'
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub '${AWS::StackName}-DistributionId'
+  
+  DistributionDomain:
+    Description: 'CloudFront distribution Domain'
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-DistributionDomain'

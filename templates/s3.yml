@@ -1,0 +1,225 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  This template create 2 S3 bucket. The first one, for long-time archive and one for data processing
+  with a lifecycle rule enabled. Data is stored in the data processing bucket, than copied to the 
+  long-time archive bucket through a Replication rule.
+
+Parameters:
+
+  Company:
+    Type: String
+    Description: Insert the company name
+
+  Project:
+    Type: String
+    Description: Insert the project name
+
+  Environment:
+    Type: String
+    Description: Insert the environment
+    Default: base
+  
+  ArchiveDataBucketName:
+    Type: String
+    Description: Name of the S3 bucket for long-time archive data
+  
+  ProcessedDataBucketName:
+    Type: String
+    Description: Name of the S3 bucekt for short-live data
+  
+  KMSKeyArn:
+    Type: String
+    Description: KMS Key ARN used to encrypt S3 contents
+  
+  CloudFrontDistributionId:
+    Type: String
+    Description: Cloudfront Distribution ID
+
+Resources:
+
+  ReplicationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - s3.amazonaws.com
+            - batchoperations.s3.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Policies:
+      - PolicyName: s3
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetReplicationConfiguration
+            - s3:ListBucket
+            Resource:
+            - !Sub arn:${AWS::Partition}:s3:::${ProcessedDataBucketName}
+          - Effect: Allow
+            Action:
+            - s3:GetObjectVersionForReplication
+            - s3:GetObjectVersionAcl
+            - s3:GetObjectVersionTagging
+            Resource:
+            - !Sub arn:${AWS::Partition}:s3:::${ProcessedDataBucketName}/*
+          - Effect: Allow
+            Action:
+            - s3:ReplicateObject
+            - s3:ReplicateDelete
+            - s3:ReplicateTags
+            Resource:
+            - !Sub arn:${AWS::Partition}:s3:::${ArchiveDataBucketName}/*
+          - Effect: Allow
+            Action:
+            - kms:Decrypt
+            - kms:Encrypt
+            Resource:
+            - !Ref KMSKeyArn
+
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ProcessedDataBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Ref KMSKeyArn
+              SSEAlgorithm: 'aws:kms'
+      VersioningConfiguration:
+        Status: Enabled
+      ReplicationConfiguration:
+        Role: !GetAtt ReplicationRole.Arn
+        Rules:
+        - Destination:
+            Bucket: !GetAtt ArchivedBucket.Arn
+            EncryptionConfiguration:
+               ReplicaKmsKeyID: !Ref KMSKeyArn
+            StorageClass: GLACIER
+          SourceSelectionCriteria:
+            SseKmsEncryptedObjects:
+              Status: Enabled
+          Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+        - AbortIncompleteMultipartUpload:
+            DaysAfterInitiation: 7
+          Status: Enabled
+        - ExpiredObjectDeleteMarker: true
+          Status: Enabled
+        - Id: InfrequentAccessRule
+          Status: Enabled
+          Transitions:
+          - TransitionInDays: 30
+            StorageClass: STANDARD_IA
+      Tags:
+      - Key: Company
+        Value: !Ref Company
+      - Key: Project
+        Value: !Ref Project
+      - Key: Environment
+        Value: !Ref Environment
+  
+
+  ProcessedBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ProcessedBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AllowSSLRequestsOnly # AWS Foundational Security Best Practices v1.0.0 S3.5
+          Effect: Deny
+          Principal: '*'
+          Action: 's3:*'
+          Resource:
+          - !GetAtt 'ProcessedBucket.Arn'
+          - !Sub '${ProcessedBucket.Arn}/*'
+          Condition:
+            Bool:
+              'aws:SecureTransport': false
+        - Sid: CloudFrontOriginAccessIdentityPolicy
+          Action: 's3:GetObject'
+          Effect: Allow
+          Principal:
+            Service: cloudfront.amazonaws.com
+          Resource: !Sub 'arn:${AWS::Partition}:s3:::${ProcessedBucket}/*'
+          Condition:
+            StringLike:
+              "AWS:SourceArn": !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistributionId}"
+  
+
+  # Bucket used to archive data in the Glacier storage class
+  ArchivedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ArchiveDataBucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+        - BucketKeyEnabled: true
+          ServerSideEncryptionByDefault:
+            KMSMasterKeyID: !Ref KMSKeyArn
+            SSEAlgorithm: 'aws:kms'
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+      - Key: Company
+        Value: !Ref Company
+      - Key: Project
+        Value: !Ref Project
+      - Key: Environment
+        Value: !Ref Environment
+
+  ArchivedBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArchivedBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AllowSSLRequestsOnly # AWS Foundational Security Best Practices v1.0.0 S3.5
+          Effect: Deny
+          Principal: '*'
+          Action: 's3:*'
+          Resource:
+          - !GetAtt 'ArchivedBucket.Arn'
+          - !Sub '${ArchivedBucket.Arn}/*'
+          Condition:
+            Bool:
+              'aws:SecureTransport': false
+
+Outputs:
+
+  ArchiveDataBucketArn:
+    Description: S3 Bucket ARN for archived data
+    Value: !GetAtt ArchivedBucket.Arn
+    Export:
+     Name: !Sub  ${AWS::StackName}-ArchiveDataBucketArn
+  
+  ProcessedDataBucketArn:
+    Description: S3 Bucket ARN for processed data
+    Value: !GetAtt ProcessedBucket.Arn
+    Export:
+     Name: !Sub  ${AWS::StackName}-ProcessedDataArn
+  
+  ProcessedDataBucketDomainName:
+    Description: Regional Domain Name of the Bucket
+    Value: !GetAtt ProcessedBucket.RegionalDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-ProcessedDataBucketDomainName
